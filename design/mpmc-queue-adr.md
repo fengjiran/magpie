@@ -1,143 +1,80 @@
-# ADR-003：全局 MPMC 队列——绕圈语义、满空判定与批量出队协议
+# ADR-003：全局 MPMC——载荷、reservation hole 与弱 try 契约
 
-- 状态：**已接受**
-- 日期：2026-09-21
-- 修订：v1.1（2026-09-22）：P2-12 diff>0 归因修正、P1-3 FIFO 端到端口径、测试名统一
-- 修订：v1.2（2026-09-22）：P3-d dequeue 追圈分支补 cpu_relax；P3-e §7 的"严格有界"改"形式上无界、实践中瞬态收敛"；P3-f §1 第三件事改为唤醒配套口径（废除近似深度计数器）
-- 修订：v1.3（2026-09-29）：P3-q 批次——§7 槽位布局对照实验升级为 W2.9
-- 修订：v1.4（2026-10-01）：**P3-w 批次（承诺收窄）**——§3.3 端到端执行序表述收窄为"单批内 FIFO"，全池执行序不承诺；测试 `GlobalFifoEndToEnd` 更名 `BulkTransferPreservesFifoOrder`（主文档场景 #16）
-- 修订：v1.5（2026-10-01）：**P3-x 批次（progress 口径修正）**——§3.2 补 reservation hole 边界款（判空 ⟺ 头部未发布；已发布后继元素可并存；洞窗形式上无界）；§7 受益改"lock-free（try 语义）≠ 无卡点"；§6 补 `ProducerClaimStall` 与 MAGPIE_TEST_HOOK 测试缝声明
-- 修订：v1.6（2026-10-01）：**P3-y 批次（测试缝统一契约 + L3）**——§6 缝契约扩展为"注册表由 test-plan §4.5 唯一维护"；§6 补 `LinearizabilitySmoke`（小状态空间线性化检查器挂载）
-- 修订：v1.7（2026-10-01）：**P3-ad 批次（措辞修正）**——§7 受益的 lock-free 表述改为"系统级 lock-free、不承诺单线程有界完成"（旧"必于有限步完成"属 wait-free 风格，与 §3.2 追圈无界面相矛盾）
-- 上位约束：[magpie设计方案.md](magpie设计方案.md) §7.2、§10.1、§10.3 场景 #5/#6
+- 状态：**已修订，待实现验证（v2.0，2026-10-03）**。
+- 上位约束：[magpie设计方案.md](magpie设计方案.md) §7.2、§8、§10。
+- 修订：纠正 Task** 载荷/slot 作用域、满空与线性化表述、索引溢出和 oracle。旧版“已接受的系统级 lock-free FIFO”结论撤回。
 
----
+## 1. 问题与约束
 
-## 1. 背景与问题
+MPMCQueue<T> 存储 T，池实例化 MPMCQueue<Task*>。enqueue(T)、dequeue(T&) 和 dequeue_bulk(T*) 与此一致；不再给 T 多加一级指针。
 
-全局队列是提交入口与"溢出接收者"（upstream §4.1），采用 Vyukov 有界 MPMC 环形。本 ADR 落实：
+每个槽包含 atomic<size_t> seq 和普通 T data。T 要求默认构造、拷贝构造/赋值均不抛且 trivially copyable；Task* 满足。只有取得相应 position 的线程才能访问 data；seq acquire/release 保护其生命周期。认领之后没有可抛操作、用户回调或分配。
 
-1. **绕圈语义（wrap-around）的完整证明**——含槽位令牌的初始化、满/空判定的正确性、追圈的活跃性边界；
-2. **批量出队协议的裁决**——初版"循环单元素"与备选"CAS 段抢占"的取舍，及 `BULK_LIMIT` 标定方法；
-3. **唤醒触发的配套口径**——近似深度计数器已废除（upstream §7.2.4），唤醒改由 EventCount 内部闸门承担，本队列不参与任何唤醒判定（§5）。
+容量在外部规范化，基础结构最低 2、池层最低 16；分配 byte size 与取整校验。初版只支持 64 位目标。索引不回绕，pos+capacity 前 release 有效的上限检查避免 unsigned 回绕/有符号差 UB。
 
-## 2. 决策摘要
+## 2. 协议与骨架
 
-| 项 | 决策 |
+代码唯一源为主设计 §7.2.1。Slot* 在重试循环外声明，break 后仍可访问。
+
+| 阶段 | 条件/操作 |
 |---|---|
-| 容量 | `2^n`（构造向上取整），用 `pos & mask` 取槽 |
-| 令牌 | 每槽 `seq` 原子；初始化 `seq[i] = i`；enqueue 写 `pos+1`、dequeue 写 `pos+capacity` |
-| 满/空判定 | 有符号差 `diff = seq − pos`：enqueue 看 `diff==0` 可用 / `diff<0` 满 / `diff>0` 绕圈；dequeue 对称 |
-| 批量出队 | 初版循环单元素 `dequeue`；CAS 段抢占协议明确不做（§4） |
-| DiscardOldest | = 队头 `dequeue`，被丢者由调用方回收（upstream §8.4 S2） |
-| 绕圈 | 队列内**无自旋**：`diff>0` 仅重读头/尾索引即自愈；池层溢出自旋见 upstream §11.2 |
+| 初始 | seq[i]=i |
+| 入队可写 | seq==pos，CAS enqueue_pos 取得位置 |
+| 数据发布 | 写 data 后 seq.store(pos+1,release) |
+| 出队可读 | seq==pos+1，CAS dequeue_pos 取得位置 |
+| 槽释放 | 读 data 后 seq.store(pos+capacity,release) |
 
-## 3. 令牌生命周期与绕圈语义
+先检查令牌再 CAS；返回 false 不携带认领。size_t 索引不回绕，因此用相等/大小比较，不作两个 intptr_t 的可能溢出减法。seq 大于预期时重读 position，可无限竞争重试；cpu_relax 不代表具有时间上限。
 
-### 3.0 协议纪律（正确性的根基）
+## 3. try 失败含义与 progress
 
-**先检查槽位状态，后 CAS 抢占位置；任何"放弃"（返回 false）绝不携带抢占。**
+enqueue false：当前选中的物理槽还不可复用；可能是容量用尽，也可能 consumer 已认领但尚未释放槽。不能推出“已发布未消费任务数≥capacity”。
 
-- enqueue 只有在读到 `seq == pos`（槽位确认空闲）时才 CAS 抢占 `enqueue_pos`；dequeue 只有在读到 `seq == pos + 1`（槽位确认已发布）时才 CAS 抢占 `dequeue_pos`。
-- **反例（为什么不能先 fetch_add 抢占）**：若生产者 E(p) 先抢占位置再判满/被抢占，交错"dequeue 把位置 p 当空消费掉 → E(p) 苏醒后写入 `seq = p+1`"会使该数据永无消费者认领（dequeue_pos 已越过 p），且槽位世代 = p+1 会让后续 enqueue/dequeue 永久误判满/空——槽位报废、任务丢失。检查先行的版本中，放弃发生在抢占之前，位置计数不被消耗，"下次再来"仍成立，故该交错**结构性不可能**。
-- 该纪律连同满/空判定构成上游 [magpie设计方案.md](magpie设计方案.md) §7.2.2 的实现级骨架，任何重构不得破坏。
+dequeue false：当前头部未发布；producer p 暂停而 p+1 已成功发布时，后继任务可存在。不能推出全局集合为空。
 
-### 3.1 槽位状态机
+成功位置的 CAS 给出认领位置顺序，seq release 给出数据/槽可访问时刻。这不是严格线性化 FIFO try_empty/try_full 契约；不指定 seq release 为与严格 FIFO 等价的全局线性化点，也不宣称成功调用的返回顺序就是队列顺序。
 
-槽 `i` 的 `seq` 取值随操作演化，构成"生命周期令牌"：
+**Reservation hole 历史**：A 认领 p 后暂停，B 发布 p+1 并返回，C 随后 dequeue false；这个历史在严格 FIFO 顺序模型中不合法，但在允许 unavailable 结果的弱 try 规格中合法。测试不能拿严格 std::queue 的“空则 false”模型判断该返回。
 
-```
-seq = i                     初始（首轮 enqueue 期望在此处遇到 seq == pos == i）
-seq = pos                   空槽：第「pos 世代」的生产者可写入
-seq = pos + 1               已发布：数据就绪，可被 dequeue（dequeue 期望 seq == pos+1）
-seq = pos + capacity        已消费：dequeue 释放槽位后写入，为「pos 世代」的再下一轮空位铺路
-```
+至少一个已认领线程暂停就可能让有效数据流停止，即使其他 try 调用不断失败返回；不把这些失败当作严格队列的 lock-free progress 证明。契约只承诺无队列 mutex、失败不消耗位置；不承诺单调用有界完成或严格 FIFO lock-free progress。池级活性依赖过门提交/消费者继续调度、完成发布/释放。头部生产者恢复发布后的通知负责恢复工作获取。
 
-同一物理槽被不同"世代"的 pos 复用（环形），`seq` 携带世代号使"这个槽位当前属于谁"可判定。槽位状态的推进只能由**代号匹配**的写者完成（enqueue 写 `pos+1`、dequeue 写 `pos+capacity`），且各代操作经"检查→抢占"串行化，故任一时刻槽状态必为最近一个已完成写入的代号。`seq` 与头尾索引全部 64 位，真实溢出（2⁶⁴ 次操作）不可达（与上游 §10.3 的 64 位 wrap 假设一致，debug 构建持续监护）。
+## 4. bulk 与权衡
 
-### 3.2 满/空判定的正确性
+dequeue_bulk 是最多 limit 次单元素 dequeue，每项独立 CAS，首个失败即停止。limit 在池层钳制 local_capacity，以免向容量 16 的本地 deque 推入 32 项。
 
-**enqueue 视角**（读 `pos`，`diff = seq − pos` 按有符号整数运算）：
+初版不做段 CAS 抢占。循环单元素有可解释的共享成本；在所有外部任务都经过全局队列的负载下，bulk 并不减少“每项全局 dequeue CAS”，只减少调度决策/本地执行切换。是否需要专用 bulk 必须由数据裁决。
 
-- `diff == 0`：槽处于 `pos` 世代的空闲态 ⟹ 可写，CAS 抢占后落笔 ✓
-- `diff < 0` ⟹ **满**。证明：`seq < pos` 意味着该槽最近一个已完成写者的世代 ≤ `pos − capacity`。槽状态由匹配代号写者步步推进，若 `pos − capacity` 世代的 dequeue 已完成，槽态必为 `pos`（无负差）；因此 `diff < 0` ⟹ `pos − capacity` 世代的消费**未完成** ⟹ 已发布未消费元素数 ≥ capacity（dequeue_pos 落后 enqueue_pos 至少一整圈）⟹ 满 ✓ 此时返回 false **未抢占任何位置**，队列状态无损（纪律 §3.0）。
-- `diff > 0`：真正来源是函数入口 `enqueue_pos_.load()` 与 `slot->seq.load()` 之间队列绕满一圈（槽世代领先 pos 整圈）；`compare_exchange_weak` 失败时 pos 参数已被更新，不会产生陈旧值。该分支重读自愈在实践中瞬态收敛、形式上无上界（高争用下可反复陈旧），因此分支内加 `cpu_relax()` 且不号称无界成立（P2-12）。
+BULK_LIMIT 扫描 {1,4,16,32,64,128}，每个配置都钳制接收容量，观测吞吐、队列滞留、p99、stolen、缓存争用。不能用 enqueue_pos−dequeue_pos 当作精确“已发布深度”：它包含认领未发布，也不包含已认领未释放的占用槽。
 
-**dequeue 视角**：`diff = seq − (pos + 1)`：`diff == 0` 已发布可读（CAS 抢占后读取）；`diff < 0` ⟹ 空——数据发布（`seq = pos+1`）尚未发生，无数据可消费且放弃不消耗位置 ✓；`diff > 0` 同为陈旧 pos 自愈。对称成立。
+## 5. 所有权、拒绝与通知
 
-**Reservation hole 边界（P3-x 补注，progress 口径修正）**：enqueue 的"CAS 抢占位置 → 写 data → `seq` 发布"之间是**认领未发布窗口**——producer A 抢占位置 p 后被调度挂起，头部槽 p 保持 `seq == p`；consumer 只检查头部 ⟹ 判空返回 false，**即使 p+1 乃至更后方的元素已由其他生产者完成发布**（`try_dequeue()==false` 与"队列内存在已发布元素"可并存）。推论：
+discard_oldest 等同一次 dequeue，成功后池层销毁 dropped、discarded++、dec_pending；队列不删除 Task，不保存 future/异常语义。
 
-1. 本队列是**lock-free（try 语义）**：任一操作在他人暂停时都能在有限步内完成（含返回 false），不因此失去进度——但它**不是 wait-free FIFO progress**：单个元素的领取会被"头部洞"卡住；
-2. 洞窗时长 = 抢占者被调度挂起的时长，**形式上无界**（实践中瞬态；与 §3.2 的 diff>0 追圈同一定位）。线程池语境下这会转写为尾延迟风险：提交线程在抢占与发布之间被调度器暂停 ⟹ 全部 worker 批量出队判空转入窃取/睡眠，已发布的后继任务随之等待；
-3. 池层无需为此改协议：worker 判空后的窃取/退避路径本就是兜底（安全），本补注的作用是**废止"无锁提交路径"的过强读法**并登记确定性测试（§6 `ProducerClaimStall`，经 §6 的测试缝构造该交错）。
+DiscardOldest 只删除全局当前可取得头项，不承诺全池最老提交项；头部未发布时可以失败。删除旧项后新项仍可能 enqueue 失败，最多 DISCARD_RETRY_LIMIT 次，否则 Abort。
 
-### 3.3 线性化点与 FIFO 保序
+丢弃 packaged_task 的 future 以 broken_promise 就绪。正常执行/丢弃均先完成 Task 销毁再 pending--。
 
-- enqueue 的线性化点：`slot->seq.store(pos + 1, release)`（上游 §10.2）；
-- dequeue 的线性化点：`slot->seq.store(pos + capacity, release)`；
-- **全局 FIFO 保序（队列层，P3-w 边界括注）**：头尾索引的 CAS 抢占给出全序的"位置编号"，编号与槽位证实（seq 检查）绑定；同一生产者的两个元素无法越过对方编号，跨生产者则按抢占序。故全局队列上"更早入队的任务更早被领走"，这是 DiscardOldest（丢最老）与"窃取拿最老"（上游 §5.1 公平性）语义的根基。此"FIFO"仅是**领走序 ≤ 入队序**的偏序，不延伸为任何执行序承诺（执行序边界见本节第 5 条）。
-- 注意：队列**本身不保证**"一个线程的 dequeue 返回顺序 == 入队顺序"（并发 dequeue 各自抢占），FIFO 是"领走序 ≤ 入队序"的全局偏序；上层语义只依赖这一点。
-- 端到端执行序（P3-w 收窄）：池层把每个 bulk/窃取批逆序推入本地 deque，保持的仅是**该批内**的 FIFO 相对序（且以"无重入提交、无窃取交错、单 worker"为前提）——**全池执行序不承诺 FIFO**：跨批、跨 worker、重入提交都会重排。v1.2 及之前的"端到端执行序由池层恢复"表述不可成立，原测试 `GlobalFifoEndToEnd` 已更名 `BulkTransferPreservesFifoOrder` 并收窄设置（主文档场景 #16）。队列层的"领走序 ≤ 入队序"偏序不变，它是 DiscardOldest 与公平性的根基；执行序是否 FIFO 不是本队列的职责、也不构成任何池层承诺。
+成功的新任务发布后池层无条件 notify_one。队列不判 waiters、不维护近似深度，也不承担本地溢出半批转移。通知成本/闸门语义由 ADR-002 定义。
 
-### 3.4 追圈与自愈（场景 #5）
+## 6. 验证
 
-- `diff > 0` 分支只做"重读头/尾索引"，**无队列内自旋**（仅 `cpu_relax`）：陈旧 pos 的可能来源见 §3.2（函数入口 `enqueue_pos_.load()` 与 `slot->seq.load()` 之间绕圈）。该分支为**暂无上界**的断言；以 benchmark 佐证实践中不构成循环。队列因此不持有任何跨调用的等待状态。
-- 无死锁论证：推进依赖"代号匹配的写者完成发布"，而所有写者已被抢占串行化；消费者从不等待某个未发布的特定槽（`diff<0` 立即判空返回），故"enqueue 等 dequeue、dequeue 等 enqueue"的环不存在 ✓
-- 追圈（快生产者领先慢消费者）不会造成等待——它表现为 enqueue 的 `diff<0` 判满失败，这是**有界队列的语义功能**（背压），由池层拒绝策略消化，而非队列协议的缺陷。
-
-## 4. 批量出队协议的裁决
-
-### 4.1 选项对比
-
-| 方案 | 机制 | 代入成本 | 收益前提 |
-|---|---|---|---|
-| A. 循环单元素（已选） | `dequeue_bulk` = 连续 `dequeue` 至多 `BULK_LIMIT` 次 | 每元素 ≈ 2 load + 2 CAS + 2 store（seq 与头尾索引） | 无需任何前提，零额外正确性风险 |
-| B. CAS 段抢占 | 一次 CAS 声明 `[d, d+k)`，等待段内槽全部发布后整段取走 | 实现 + 证明代价高：段内部分发布/部分空的中间态、与单元素 dequeue 的并发、段释放协议 | 仅在"全局队列常深"时摊薄 CAS 争用 |
-
-### 4.2 裁决与理由
-
-**初版选 A**，依据：
-
-1. 全局队列的定位是"均衡器 + 溢出接收"（upstream §4.1），worker 只在本地产空时访问一次——访问频率被三级退避压低，头尾 CAS 争用不是热路径（与 §4.1 意义条款一致）；
-2. B 的正确性复杂度集中在本项目最不愿意复杂化的地方（多生产者释放段），收益又只在深队列场景显现，与"简单兜底"原则冲突；
-3. 若 benchmark 证明全局队列深度常驻 ≥ `BULK_LIMIT`（`bench_skew` 深队列突发项）且头尾索引 CAS 争用可测，再为 B 单独立项（演进记录放本条开放项）。
-
-### 4.3 BULK_LIMIT 标定方法
-
-- **自变量**：`BULK_LIMIT ∈ {1, 4, 16, 32, 64, 128}`（改配置重编译，避免运行时分支干扰测量）。
-- **应变量**：`bench_empty_task` 吞吐；`bench_skew`（深队列突发）的 p99 与队列滞留时长分布；`stats().stolen`（间接反映均衡速度）；全局队列深度（`enqueue_pos_ − dequeue_pos_`）的采样分布。
-- **判据**：曲线找点——超过某值后 p99 与滞留不再改善（边际摊薄耗尽），且吞吐（均匀负载）无显著回退。预期 `32` 附近为拐点；标定完成后回填 [magpie设计方案.md](magpie设计方案.md) §16.2 常量基线并附数据。
-
-## 5. 相邻语义的边界确认
-
-### 5.1 DiscardOldest
-
-- 实现 = `dequeue` 队头（细节见 upstream §8.4 S2），**被丢弃任务的 `delete` 与 pending 退计数由池层负责**，队列不感知所有权的任何生命周期——队列永远只搬运裸指针，这是所有权模型（upstream §8.1）不与队列协议耦合的保证。
-- 与 worker `dequeue_bulk` 并发时，同槽竞争由 `seq` 令牌的 dequeue 线性化点天然串行化，不产生额外协调（场景 #6）。
-
-### 5.2 近似深度计数器（`depth_`——已废除）
-
-近似深度计数器 `depth_` 已在 P0-4 修订中**废除**，见设计方案 §7.2.4：近似计数在零值附近不可信，且"抑制 notify"与唤醒活动性保证根本冲突。现行策略是每次入队成功后无条件 `notify_one()`（由 EventCount 内部 `waiters_` 闸门判定是否真唤醒，见设计方案 §7.3.3）。本节不再描述任何深度记账。
-
-## 6. 测试对应
-
-| 测试（upstream §10.4） | 覆盖的性质 |
+| 测试 | 覆盖 |
 |---|---|
-| `SingleThreadFifo` | FIFO 保序（§3.3）与满/空边界（§3.2） |
-| `WrapAround` | 场景 #5：快生产者追慢消费者整圈 + 满判定 |
-| `MultiProdMultiCons` | 进出计数守恒（全容量边界下的无损/无重） |
-| `DiscardUnderLoad` | 场景 #6：丢弃与批量出队并发 |
-| `BulkTransferPreservesFifoOrder` | 场景 #16（P3-w 更名）：单 worker 受控下，bulk 逆序入队保持**该批内** FIFO（设计方案 5.3，P1-3）；全池执行序不承诺 |
-| `ProducerClaimStall` | §3.2 reservation hole（P3-x 补注）：经测试缝在"CAS 抢占后、seq 发布前"门控暂停 producer，断言该窗口内 `try_dequeue()==false` 与"p+1 已发布"并存、放行后恢复——确定性交错，零时序脆弱性 |
-| `LinearizabilitySmoke` | P3-y L3：小状态空间线性化检查器挂载（test-plan §4.6），2 线程 × 容量 4 × 数十 op 的合法线性化判定 |
+| SingleThreadFifo / WrapAround | 普通容量绕圈（物理复用，非整数回绕） |
+| MultiProdMultiCons | 所有已接受 id 恰消费一次 |
+| ProducerClaimStall | 认领后发布前暂停，后继发布且当前 try_dequeue false，恢复后完整消费 |
+| ConsumerClaimStall | 认领后释放前暂停，producer 可暂时不能复用，恢复后进度恢复 |
+| RelaxedQueueHistory | 弱 try 历史模型，单独校验成功 position 顺序/守恒 |
+| MpmcIndexLimit | 上限前 fail-fast，不产生整数回绕/有符号 UB |
+| DiscardUnderLoad / DiscardedFutureBrokenPromise | 丢弃/执行竞争、future 及计数 |
+| BulkReceiveCapacityBound | 16 本地容量×32 bulk 限额不越界 |
 
-**测试缝（统一契约，P3-x 引入 / P3-y 扩展）**：本 ADR 定义 `MPMCQueue::enqueue` 的一个注入点——在成功 CAS 抢占 `enqueue_pos` 之后、写 `slot->seq` 发布之前，预留 `#ifdef MAGPIE_TEST_HOOK` 编译级注入点（可重写的发布前钩子，默认空实现）。**全池测试缝的注入点全集与使用者注册表由 test-plan §4.5 唯一维护**（含 deque 的 steal/spill 缝，属 ADR-001 管辖），本 ADR 只约束 MPMC 自身缝的语义。纪律：每个注入点必须有 registered 测试；release 构建编译期剔除；禁止测试以外的任何用途；新增/变更注入点必须先更新 test-plan §4.5 注册表。
+测试缝全集由 test-plan §4.5 管理：producer position CAS 后/seq 发布前、consumer position CAS 后/seq 释放前。release 剔除测试钩子。
 
-## 7. 后果与开放性
+小状态历史检查必须允许 unavailable/spurious failure，成功任务仍只能消费一次；不能以宽松 false 规则掩盖成功 id 错误。标准 FIFO oracle 仅用于单线程无暂停场景。
 
-- **受益（P3-x 口径修正；P3-ad 措辞修正）**：提交路径是**lock-free（系统级）**——并发调用中至少有一个持续推进、整体不会死锁，所有调用均以 try 语义必然返回（无阻塞等待）；**不承诺单线程的有界完成**（CAS 竞争与 §3.2 的 `diff>0` 追圈可使单个调用反复重试、在形式上饥饿——"任一操作有限步完成"是 wait-free 风格性质，不属于本队列，P3-ad 起不再使用该表述）。FIFO 保序支撑公平性与 DiscardOldest；但"lock-free"**不读作无卡点**——头部 reservation hole（§3.2 补注）使已发布的后继元素可能在头部生产者被暂停期间不可领取，此边界已文档化并以 `ProducerClaimStall` 守护。
-- **代价**：容量必须 2 的幂（构造断言，文档化）；`diff>0` 追圈分支（enqueue/dequeue 各一处）已识别为**形式上无界**——实践中瞬态收敛（每次重读头/尾索引都取最新快照，只有入口 load 与 seq load 之间的整圈绕行会造成一次停滞），分支内的 `cpu_relax` 用于缓解争用；该性质由 benchmark 佐证，不宣称成立为有界循环（P3-e 修订）。
-- **开放项**：
-  1. CAS 段抢占批量协议（§4.2 判据触发时立项）；
-  2. 槽位布局对照实验（P3-q 修订：升级为正式工作项 W2.9，与 deque 槽同批裁决）——4096 槽 × 64B = 256KB 超出 L2 常驻的"每槽一行"与紧凑布局互为对照变体，由 bench_empty_task/bench_fine_grain 的 cache-miss 数据裁决；
-  3. `BULK_LIMIT` 标定数据回填（§4.3）。
+## 7. 性能与演进
+
+默认紧凑槽、头尾分行，W2.9 比较每槽一行。没有“256KB 必然超出 L2”的统一硬件断言。
+
+全局 producer/consumer 争用、gate/pending/submitted/epoch 均须采样；专用 bulk、分片或严格 FIFO 队列替换为独立 ADR，不能在局部优化时静默改变当前 API 恢复语义。
