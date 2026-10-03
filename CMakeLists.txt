@@ -8,8 +8,13 @@ project(magpie
 
 include(CTest)
 include(GNUInstallDirs)
+find_package(Threads REQUIRED)
 include(cmake/MagpieToolchain.cmake)
 include(cmake/MagpieOptions.cmake)
+
+option(MAGPIE_ENABLE_TEST_HOOKS
+    "Build a separate deterministic-test library with pool interleaving hooks"
+    OFF)
 
 set(MAGPIE_SANITIZER "none" CACHE STRING "Sanitizer configuration: none, thread, or address-undefined")
 set_property(CACHE MAGPIE_SANITIZER PROPERTY STRINGS none thread address-undefined)
@@ -47,9 +52,9 @@ elseif(MAGPIE_SANITIZER STREQUAL "address-undefined")
 endif()
 
 if(MAGPIE_BUILD_SHARED)
-    add_library(magpie SHARED src/build_info.cpp)
+    add_library(magpie SHARED src/build_info.cpp src/thread_pool.cpp src/worker_thread.cpp)
 else()
-    add_library(magpie STATIC src/build_info.cpp)
+    add_library(magpie STATIC src/build_info.cpp src/thread_pool.cpp src/worker_thread.cpp)
     target_compile_definitions(magpie PUBLIC MAGPIE_STATIC_DEFINE)
 endif()
 add_library(magpie::magpie ALIAS magpie)
@@ -61,8 +66,36 @@ target_include_directories(magpie
         $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>
 )
 target_compile_definitions(magpie PRIVATE MAGPIE_BUILDING_LIBRARY)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(magpie PRIVATE _GNU_SOURCE=1)
+endif()
 target_compile_definitions(magpie PUBLIC "MAGPIE_BUILD_TYPE=\"$<CONFIG>\"")
-target_link_libraries(magpie PUBLIC magpie_sanitizers)
+target_link_libraries(magpie PUBLIC magpie_sanitizers Threads::Threads)
+if(MAGPIE_ENABLE_TEST_HOOKS)
+    if(NOT BUILD_TESTING)
+        message(FATAL_ERROR "MAGPIE_ENABLE_TEST_HOOKS requires BUILD_TESTING=ON.")
+    endif()
+    add_library(magpie_test_support STATIC src/thread_pool.cpp src/worker_thread.cpp)
+    target_compile_features(magpie_test_support PUBLIC cxx_std_20)
+    target_include_directories(magpie_test_support
+        PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    )
+    target_compile_definitions(magpie_test_support
+        PRIVATE MAGPIE_BUILDING_LIBRARY MAGPIE_ENABLE_TEST_HOOKS=1
+        PUBLIC MAGPIE_STATIC_DEFINE
+    )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_compile_definitions(magpie_test_support PRIVATE _GNU_SOURCE=1)
+    endif()
+    target_link_libraries(magpie_test_support PUBLIC magpie_sanitizers Threads::Threads)
+    set_target_properties(magpie_test_support PROPERTIES
+        CXX_STANDARD 20
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS NO
+        POSITION_INDEPENDENT_CODE YES
+    )
+    magpie_apply_project_defaults(magpie_test_support)
+endif()
 if(MSVC)
     target_compile_options(magpie PUBLIC /Zc:__cplusplus)
 endif()

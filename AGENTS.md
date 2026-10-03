@@ -21,7 +21,7 @@ magpie 是面向 C++20 的固定 worker、高性能工作窃取线程池。正�
 | 来源 | 用途 |
 |---|---|
 | [README.md](README.md)、[平台矩阵](docs/platform-matrix.md) | 构建入口、平台与工具链实际支持状态 |
-| [实施计划](design/implementation-plan.md)、`results/milestones/Mx.md` | 当前范围、前置、交付与验收状态 |
+| [实施计划](design/implementation-plan.md)、`docs/milestones/Mx.md` | 当前范围、前置、交付与验收状态 |
 | [主设计](design/magpie设计方案.md) | API、所有权、调度、关闭与统计的协议约束 |
 | [ADR-001](design/chase-lev-deque-adr.md) | 单元素 Chase-Lev、屏障与池层 fallback |
 | [ADR-002](design/event-count-adr.md) | 每 worker WaitSlot、注册与关闭握手 |
@@ -43,7 +43,7 @@ magpie 是面向 C++20 的固定 worker、高性能工作窃取线程池。正�
 - `bench/`：测量 harness 与负载；benchmark flags/依赖不得污染生产库。
 - `tools/model/`：固定模型工具的输入、运行与结果判定。
 - `design/validation/`：设计骨架辅助检查，不能替代真实库测试。
-- `design/`、`docs/`、`results/`：协议、使用/平台说明和可追溯证据。
+- `design/`、`docs/`、`results/`：协议、使用/平台说明和可追溯证据；里程碑记录在 `docs/milestones/`，`results/` 原始归档仅保留在本机、不随仓库跟踪。
 - `build/`：可再生成的构建产物和开发工具，不存放唯一验证证据或待提交实现。
 
 Chase-Lev 只负责有界 push/pop/steal；全局转投、策略、通知、执行和统计属于池层。队列不执行用户代码，不管理 future，不自行销毁 Task。
@@ -146,7 +146,7 @@ MPMC 历史 oracle 允许 weak try 的 unavailable 结果，成功 id 与位置�
 
 修改 API、ownership、调度、等待或错误语义时同步主设计、相关 ADR、测试和里程碑状态。说明具体 trigger、before/after、采用方案的原因、验证与未覆盖范围。
 
-每个里程碑在 `results/milestones/Mx.md` 记录实际命令、源码 revision/dirty 状态、平台/后端、交付、回归、模型及性能结果。新运行用新目录，归档必要源码 hash、原始日志与反例；不覆盖旧失败或把本机成功记成远端 CI 成功。
+每个里程碑在 `docs/milestones/Mx.md` 记录实际命令、源码 revision/dirty 状态、平台/后端、交付、回归、模型及性能结果。原始归档写入本机 `results/`（不随仓库跟踪），新运行用新目录，归档必要源码 hash、原始日志与反例；不覆盖旧失败或把本机成功记成远端 CI 成功。
 
 只报告本轮真正执行或明确引用的证据；区分工程 smoke、模型能力探针、原语模型、正式池级测试及性能验收。剩余资源/门禁写明，不把进度或文件落盘当作完成判据。
 

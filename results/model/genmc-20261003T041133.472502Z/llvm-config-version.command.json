@@ -1,4 +1,0 @@
-[
-  "/usr/local/opt/llvm@19/bin/llvm-config",
-  "--version"
-]

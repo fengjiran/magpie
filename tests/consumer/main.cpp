@@ -1,5 +1,6 @@
 #include <magpie/build_config.hpp>
 #include <magpie/build_info.hpp>
+#include <magpie/thread_pool.hpp>
 
 #include <cstring>
 
@@ -17,5 +18,15 @@ int main() {
         info.cache_line_size != MAGPIE_CACHE_LINE) {
         return 2;
     }
+    magpie::ThreadPoolOptions options;
+    options.worker_count = 1;
+    magpie::ThreadPool pool(options);
+    auto future = pool.submit_async([] { return 42; });
+    pool.submit([] {});
+    pool.drain();
+    if (future.get() != 42) {
+        return 3;
+    }
+    pool.shutdown();
     return 0;
 }

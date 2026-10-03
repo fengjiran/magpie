@@ -1,9 +1,10 @@
-# Benchmarks remain opt-in. M2 will add benchmark targets through this
-# directory; keeping it separate prevents benchmark-only dependencies and
-# flags from entering the production library or test targets.
-function(magpie_add_benchmark target)
-    add_executable(${target} ${ARGN})
-    target_link_libraries(${target} PRIVATE magpie::magpie)
-endfunction()
-
-message(STATUS "Benchmark support is enabled; no benchmark programs are defined in M0.")
+if(NOT CMAKE_SYSTEM_NAME MATCHES "^(Linux|Darwin)$")
+    message(FATAL_ERROR "M2 benchmarks currently support Linux and macOS CPU clocks only.")
+endif()
+# Benchmark dependencies and flags stay on these opt-in targets.
+add_executable(magpie_bench main.cpp harness.cpp workloads.cpp)
+target_link_libraries(magpie_bench PRIVATE magpie::magpie)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(magpie_bench PRIVATE _GNU_SOURCE=1)
+endif()
+magpie_apply_project_defaults(magpie_bench)

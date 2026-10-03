@@ -6,6 +6,7 @@ if(NOT DEFINED MAGPIE_SOURCE_DIR)
 endif()
 
 set(BUILD_TESTING OFF CACHE BOOL "Keep the nested magpie build production-only" FORCE)
+set(MAGPIE_ENABLE_TEST_HOOKS OFF CACHE BOOL "Keep the nested magpie build production-only" FORCE)
 add_subdirectory("${MAGPIE_SOURCE_DIR}" magpie-source EXCLUDE_FROM_ALL)
 
 add_executable(magpie_external_consumer main.cpp)

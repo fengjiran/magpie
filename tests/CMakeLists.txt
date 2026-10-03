@@ -68,3 +68,37 @@ function(magpie_add_test_suite target label)
     add_test(NAME ${target} COMMAND ${target})
     set_tests_properties(${target} PROPERTIES LABELS ${label} TIMEOUT ${_timeout})
 endfunction()
+
+add_executable(magpie_pool_tests unit/pool_test.cpp unit/api_compile_test.cpp)
+if(MAGPIE_ENABLE_TEST_HOOKS)
+    target_link_libraries(magpie_pool_tests PRIVATE magpie_test_support GTest::gtest_main
+        magpie_sanitizers)
+    target_compile_definitions(magpie_pool_tests PRIVATE MAGPIE_ENABLE_TEST_HOOKS=1)
+else()
+    target_link_libraries(magpie_pool_tests PRIVATE magpie::magpie GTest::gtest_main
+        magpie_sanitizers)
+endif()
+magpie_apply_project_defaults(magpie_pool_tests)
+add_test(NAME magpie_pool_tests COMMAND magpie_pool_tests)
+set_tests_properties(magpie_pool_tests PROPERTIES LABELS fast TIMEOUT 20)
+magpie_add_test_suite(magpie_pool_stress_tests stress
+    unit/pool_stress_test.cpp
+)
+
+if(NOT MAGPIE_SANITIZER STREQUAL "thread")
+    magpie_add_test_suite(magpie_pool_death_tests fast
+        unit/pool_death_test.cpp
+    )
+    set_tests_properties(magpie_pool_death_tests PROPERTIES TIMEOUT 20)
+endif()
+
+if(MAGPIE_BUILD_BENCHMARKS)
+    magpie_add_test_suite(magpie_bench_tests fast
+        bench/harness_test.cpp ../bench/harness.cpp)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_compile_definitions(magpie_bench_tests PRIVATE _GNU_SOURCE=1)
+    endif()
+    add_test(NAME magpie.benchmark-runner
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/bench/test_runner.py")
+    set_tests_properties(magpie.benchmark-runner PROPERTIES LABELS fast TIMEOUT 20)
+endif()

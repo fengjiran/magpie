@@ -1,0 +1,11 @@
+{
+  "program": "bench_empty_task",
+  "workers": 1,
+  "producers": 1,
+  "capacity": 4096,
+  "rejection": "abort",
+  "warmup": 2.0,
+  "duration": 10.0,
+  "sample-stride": 1024,
+  "seed": 20260929
+}

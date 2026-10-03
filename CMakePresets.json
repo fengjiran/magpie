@@ -13,7 +13,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "MAGPIE_SANITIZER": "none",
-        "BUILD_TESTING": "ON"
+        "BUILD_TESTING": "ON",
+        "MAGPIE_ENABLE_TEST_HOOKS": "ON"
       }
     },
     {
@@ -23,7 +24,8 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "MAGPIE_SANITIZER": "thread",
-        "BUILD_TESTING": "ON"
+        "BUILD_TESTING": "ON",
+        "MAGPIE_ENABLE_TEST_HOOKS": "ON"
       }
     },
     {
@@ -33,18 +35,85 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "MAGPIE_SANITIZER": "address-undefined",
-        "BUILD_TESTING": "ON"
+        "BUILD_TESTING": "ON",
+        "MAGPIE_ENABLE_TEST_HOOKS": "ON"
+      }
+    },
+    {
+      "name": "bench",
+      "displayName": "M2 Release benchmarks",
+      "binaryDir": "${sourceDir}/build/bench",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "MAGPIE_SANITIZER": "none",
+        "BUILD_TESTING": "OFF",
+        "MAGPIE_ENABLE_TEST_HOOKS": "OFF",
+        "MAGPIE_BUILD_BENCHMARKS": "ON",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       }
     }
   ],
   "buildPresets": [
-    { "name": "release", "configurePreset": "release", "configuration": "Release" },
-    { "name": "tsan", "configurePreset": "tsan", "configuration": "RelWithDebInfo" },
-    { "name": "asan-ubsan", "configurePreset": "asan-ubsan", "configuration": "RelWithDebInfo" }
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "configuration": "Release"
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "asan-ubsan",
+      "configurePreset": "asan-ubsan",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "bench",
+      "configurePreset": "bench",
+      "configuration": "Release"
+    }
   ],
   "testPresets": [
-    { "name": "release-fast", "configurePreset": "release", "configuration": "Release", "filter": { "include": { "label": "fast" } }, "output": { "outputOnFailure": true } },
-    { "name": "tsan-fast", "configurePreset": "tsan", "configuration": "RelWithDebInfo", "filter": { "include": { "label": "fast" } }, "output": { "outputOnFailure": true } },
-    { "name": "asan-ubsan-fast", "configurePreset": "asan-ubsan", "configuration": "RelWithDebInfo", "filter": { "include": { "label": "fast" } }, "output": { "outputOnFailure": true } }
+    {
+      "name": "release-fast",
+      "configurePreset": "release",
+      "configuration": "Release",
+      "filter": {
+        "include": {
+          "label": "fast"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "tsan-fast",
+      "configurePreset": "tsan",
+      "configuration": "RelWithDebInfo",
+      "filter": {
+        "include": {
+          "label": "fast"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "asan-ubsan-fast",
+      "configurePreset": "asan-ubsan",
+      "configuration": "RelWithDebInfo",
+      "filter": {
+        "include": {
+          "label": "fast"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    }
   ]
 }

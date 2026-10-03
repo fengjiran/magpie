@@ -18,6 +18,6 @@ python3 tools/model/run_genmc_probes.py \
 - 这只是工具及 atomic/fence 输入能力探针，不是 deque、MPMC 或 EventCount 的项目模型。
 - RC11 结果不覆盖所有 C++20 细节、平台 ABI、操作系统 futex 行为或活性证明；各协议仍需有界模型和真实实现回归。
 - 本地原生运行或 sanitizer 不是弱内存模型验证。
-- 本机 capability probe 已通过。结果目录 [genmc-20261003T041133.472502Z](../../results/model/genmc-20261003T041133.472502Z/run.json) 保存了 GenMC v0.17.0 commit、LLVM 19.1.7、完整命令、输出、RC11 探索数、断言 trace 和 DOT graph。首轮执行因 runner 对断言错误格式要求过窄而失败，原始日志保留在 [genmc-20261003T041011.380988Z](../../results/model/genmc-20261003T041011.380988Z/run.json)；修订后的判据依据固定版本 trace，通过后才关闭 capability probe。
+- 本机 capability probe 已通过。结果目录 `results/model/genmc-20261003T041133.472502Z/`（不随仓库跟踪）保存了 GenMC v0.17.0 commit、LLVM 19.1.7、完整命令、输出、RC11 探索数、断言 trace 和 DOT graph。首轮执行因 runner 对断言错误格式要求过窄而失败，原始日志保留在 `results/model/genmc-20261003T041011.380988Z/`；修订后的判据依据固定版本 trace，通过后才关闭 capability probe。
 
 固定版本来源：[GenMC v0.17.0](https://github.com/MPI-SWS/genmc/tree/v0.17.0)、[该版本 CLI 手册](https://github.com/MPI-SWS/genmc/blob/v0.17.0/doc/manual/cli.md)。手册提供 `-rc11` 参数（并说明它是默认 memory model）和 `-dump-error-graph=<file>`；探针显式传入两者。该版本实测输出先报告 `Safety violation`，再在 trace 中列出原始 `assert(...)` 和源行；脚本据此校验完整上下文。升级工具版本时重新审查 CLI、LLVM 要求和模型边界，并更新固定版本与探针结果。

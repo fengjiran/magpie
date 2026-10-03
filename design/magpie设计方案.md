@@ -1,13 +1,16 @@
 # magpie 设计方案
 
-> 修订：2026-10-03，审核修复版本。状态：**设计已修订；M0 工程骨架已实现，线程池与原语待实现和平台验证**。
+> 修订：2026-10-03，审核修复版本。状态：**设计已修订；M1 mutex 正确性底座已在 macOS 本机实现和验证，Linux worker backend 尚待 CI/原生验证**。
 > [审核报告](review-2026-10-03.md) 保留旧版反例；[修复对照](review-fixes-2026-10-03.md) 记录逐项处置。旧版批量 CAS、overflow 与共享 futex 字协议全部撤回。
 
 ## 1. 文档目的与约束
 
 本文件定义项目定位、组件职责、公开 API、关键原语骨架、所有权、关闭协议和验收。三个 ADR 补充协议依据；test-plan/benchmark-plan 分别定义正确性与性能证据。主设计与 ADR 冲突时先修正文档，不靠实现自行选择口径。
 
-当前已有 M0 CMake 库骨架和 build-info 诊断目标，但尚无 ThreadPool、队列、线程后端或停车后端实现；下文代码段仍是设计骨架。GenMC atomic/fence capability probe 已验证工具输入能力，但不能替代项目原语模型、真实线程池、Linux futex、ARM64 或性能验收。
+当前实现是固定 worker + 全局有界 mutex ring 的 M1 基线，使用 condition_variable 停车。还没有 Chase-Lev、MPMC 或 EventCount；下文涉及这些原语的代码段仍是设计骨架。GenMC atomic/fence capability probe 不能替代项目原语模型、Linux pthread 原生验证、Linux futex、ARM64 或性能验收。
+
+M2 已新增 opt-in benchmark harness、独立源码快照与基线重跑入口，未改变上述生产协议。
+测量边界与不适用维度见 [benchmark 使用说明](../docs/benchmarks.md)，实际验收状态见 [M2 milestone](../docs/milestones/M2.md)。
 
 核心 invariant：
 
@@ -45,6 +48,8 @@ magpie 是固定 worker 数的通用 C++20 工作窃取线程池，主要服务 
 - 池层调度：批量接收、重复单项窃取、通知、策略、执行和计数。
 - EventCount：一个共享 epoch 与注册计数，N 个稳定 WaitSlot，通知者扫描并标记一个/全部等待状态。
 - Task 执行：统一 run_one，包括 worker、外部 CallerRuns、内部满队列 fallback。
+
+**M1 当前实现边界：**调度只经过固定容量的全局 mutex ring，worker 按 FIFO 取任务；owner TLS 仅用于识别 worker 内满队列提交，并强制 inline fallback。M1 不创建本地 deque、MPMC queue 或 EventCount。worker 等待谓词由 queue mutex 保护的 condition_variable 握手；关闭中 worker 仍可停车等待 pending/gate 归零，不采用 M5 的每 worker WaitSlot/EventCount 注册协议。`DiscardOldest` 在同一个 queue mutex 临界区删除当前可取得的全局头并发布新任务；被移除 Task 在解锁并通知后销毁，因此其 capture destructor 不在队列锁内运行。该 mutex 基线避免 MPMC 中的 reservation retry 窗口，之后替换队列时仍须保留公共所有权和计数协议。
 
 旧 spill_lowest_half、overflow 缓冲、take_overflow、drain_spill_overflow 已删除。固定容量约束由 try_push 返回值表达，没有半批认领后的暂存或失败分区循环。
 
@@ -218,6 +223,8 @@ DiscardOldest 删除当前全局头部可取得任务，最多 DISCARD_RETRY_LIM
 ### 6.4 等待与执行上下文
 
 本池任务内不得阻塞等待本池 future（包括 get/wait/定时等待），也不得调用本池同步 shutdown/drain/析构。适用于 worker、外部 CallerRuns、内部 fallback、异常回调及池调用的 capture 析构。
+
+`exception_handler` 可并发地从多个 worker 和外部 CallerRuns 提交者调用；调用方必须保证其可变捕获状态线程安全。池不通过额外回调锁串行用户代码。池持有的 handler 在复制及销毁时处于 `ExecutionScope(this)`，并在其他 Impl 同步状态仍存活时销毁；外部 Options 副本的捕获对象仍由调用方管理。
 
 使用独立、可嵌套的 thread_local ExecutionFrame 链表示正在执行的池，遍历链检测本池；不能仅看 owner worker TLS 或最顶层 frame。shutdown/drain 违反契约抛 logic_error；析构违反契约 terminate，release 同样有效。跨池调用只有不形成依赖环才安全，本库不自动检测跨池等待图。
 
@@ -585,6 +592,8 @@ ExecutionFrame 链随 RAII 压入/恢复，所有嵌套帧都参与 require_exte
 2. 自旋/yield 等 in_flight_submitters.load(SC)==0；等待包括已过门 CallerRuns。
 3. evc.notify_all()。
 
+以上是目标 EventCount 协议。M1 mutex 变体在同一个 queue mutex 下写入 worker stopping 谓词并通知 queue condition_variable；worker 仅在 stopping、提交门为零、pending 为零同时成立时退出。stopping 时 Gate 的 1→0 与 pending 的 1→0 也在持 queue mutex 时广播；正常运行期间这两个归零转换不广播，任务发布仍只通知一个 worker。该变体允许关闭期停车，不等同于 EventCount 的注册/唤醒握手。
+
 允许多个外部线程调用，重复通知无害。停止后所有 submit 都被拒，包含已有任务再提交子项。任务须自行处理 ShuttingDown。已接受任务仍执行完。
 
 被拒提交仍短暂入门，连续拒绝流可延迟 shutdown 返回，调用方应停止生产；不承诺外部持续调用、无限任务、永久阻塞或线程不被调度时有界完成。同步 shutdown 不能在本池任务/回调中调用，避免自己持 Gate 的自等待。
@@ -592,6 +601,8 @@ ExecutionFrame 链随 RAII 压入/恢复，所有嵌套帧都参与 require_exte
 ### 9.2 worker 退出
 
 按 stopping SC → 门 SC 为零 → pending acquire 为零裁决。所有过门提交在 Gate 内计数/发布/执行，读到停止和门零后不会再接受任务；pending 零表示存量清空。后来的拒绝提交不改 pending。
+
+M1 的 condition_variable worker 谓词还将 gate==0 纳入退出条件，避免 worker 在提交者已通过 stop 检查、尚未执行 pending++ 时退出。Gate 1→0 在 stopping 已置位时持 queue mutex 再广播，覆盖这个窗口；pending 1→0 在同一锁上广播以唤醒仍有其他 worker task 的停机 worker。
 
 ### 9.3 drain
 
@@ -652,7 +663,7 @@ deque push bottom release；普通 pop bottom 减量按完整协议裁决；最�
 - 池级：提交/拒绝/future、嵌套控制禁令、关闭/排空、构造回滚及配置。
 - 工具：release、TSan、ASan+UBSan；完整清单唯一来源 [test-plan](test-plan.md) §6。
 - 平台：generic 同套测试为补充，原生 Linux 单独运行真实 futex；ARM64 是内存序放宽的附加必要证据。
-- 库尚未实现，所有正式门禁均待执行。design/validation 的辅助检查只验证记录的骨架和有限交错。
+- M1 mutex pool 已在 macOS 本机 Release、TSan、ASan+UBSan fast 和 Release 1M ID stress 运行；结果与 Linux/backend 未验收项见 [M1 milestone](../docs/milestones/M1.md)。deque、MPMC、EventCount 正式门禁仍待对应里程碑执行。design/validation 的辅助检查只验证记录的骨架和有限交错。
 
 ## 11. 拒绝策略与背压
 
@@ -707,11 +718,11 @@ slot_bytes 使用该原语实际 Slot 尺寸（含布局 padding），不得用 
 
 ### 12.3 线程后端与亲和性
 
-Linux pthread 后端用 pthread_create(attr, trampoline) 创建线程；worker_stack_size 非零时校验 PTHREAD_STACK_MIN/平台限制、pthread_attr_setstacksize，失败记录 warning 并退默认。句柄 RAII 只 join 已成功启动的线程，所有控制路径一致。
+Linux pthread 后端用 pthread_create(attr, trampoline) 创建线程；worker_stack_size 非零但低于 PTHREAD_STACK_MIN、或 pthread_attr_setstacksize 失败时记录 warning 并退默认。`pin_to_cores` 在成功创建后按允许逻辑 CPU 轮转并 best-effort 调用 pthread_setaffinity_np；cpuset 变化或 affinity 设置失败只 warning，不把 best-effort 绑核变成构造失败。句柄 RAII 只 join 已成功启动的线程，所有控制路径一致。
 
 generic 后端用 std::thread，非零 stack_size warning 忽略。std::thread 不接收 pthread_attr；不再描述在 std::thread 上注入 attr。
 
-默认按允许 CPU 集合和拓扑选择，hardware_concurrency 是提示，不等于容器 quota。pin_to_cores 按允许集合优先不同物理核、再轮转 SMT；超订/容器限制写日志。NUMA 仅预留 victim selector 切面，不在初版实现多节点路由。
+默认不强制绑核；hardware_concurrency 是 worker 数量提示，不等于容器 quota。M1 的 `pin_to_cores` 在 Linux 只按进程允许集合中的逻辑 CPU 轮转，不检查物理核拓扑；affinity 查询或线程创建后的 `pthread_setaffinity_np` 失败时记录 warning 并保持不绑核。generic backend 记录 warning 并忽略 pinning。物理核优先、SMT 和超订诊断属于后续有硬件依据的演进；NUMA 仅预留 victim selector 切面。
 
 ## 13. 可观测性
 
@@ -727,14 +738,14 @@ Stats 字段：
 | stolen | 成功单项 steal 的任务数 |
 | pending | 未配平计数，包含提交决策中任务 |
 | local_spills | 本地 try_push 失败后转投当前任务的次数 |
-| wakes / wake_threads | backend 调用数 / Linux 实际返回累计；generic 的 wake_threads 为 optional 空 |
+| wakes / wake_threads | M1 为 condition_variable notify 调用数；目标 backend 调用数 / Linux 实际返回累计；generic 的 wake_threads 为 optional 空 |
 | post_wake_hit / post_wake_empty | backend 返回后首轮探测，包含虚假/中断返回 |
 | pre_sleep_scan_hit / pre_sleep_scan_empty | 注册后最后探测的命中/空 |
 | notify_scan_slots | 通知实际扫描槽数 |
 
 submitted/rejected/discarded 共享行，pending 单独行，门单独行；每 worker completed/stolen 等原子统计分行，external_stats 供多提交者内联完成；epoch/注册/cursor 分行。内联与 worker 执行路径均触碰 pending。
 
-每次成功提交的共享 RMW 至少：门++/--、pending++、submitted++、epoch推进；完成 pending--。有等待者时再有扫描/CAS。stats 按项 relaxed load，允许瞬时不自洽；完全 quiescent、无成员调用时 submitted=completed+discarded 且 pending=0，rejected 不是该恒等式的减项。
+目标 EventCount 版本每次成功提交的共享 RMW 至少：门++/--、pending++、submitted++、epoch推进；完成 pending--。M1 没有 epoch，使用 mutex ring 与 condition_variable；其 `wakes` 记录实际调用 `notify_one`/`notify_all` 的次数，不代表被 OS 唤醒的线程数。stats 按项 relaxed load，允许瞬时不自洽；完全 quiescent、无成员调用时 submitted=completed+discarded 且 pending=0，rejected 不是该恒等式的减项。
 
 Stats 完整定义见 §6.2，计数字段 uint64_t、wake_threads optional<uint64_t>；统计回绕另用明确饱和策略，不用 stats 参与业务协议。inline_completed 包括 worker 线程在 submit 内的 CallerRuns，不能按当前 OS 线程身份将其计入 worker_completed。
 
@@ -834,10 +845,10 @@ W1：mutex 基线先落实 API/所有权/执行上下文/提交门/pending/关�
 - [ADR-001](chase-lev-deque-adr.md)：v2.0，单项协议与池层 fallback，待实现验证。
 - [ADR-002](event-count-adr.md)：v3.0，每 worker 停车字与注册后 stop，待实现与模型检查。
 - [ADR-003](mpmc-queue-adr.md)：v2.0，载荷类型/弱 try 契约/进度边界，待实现验证。
-- [test-plan](test-plan.md)：审核修订版，正式用例待实现执行。
+- [test-plan](test-plan.md)：正式用例名称、M1 已执行测试及后续原语门禁。
 - [benchmark-plan](benchmark-plan.md)：审核修订版，暂无实测数据。
 - [审核报告](review-2026-10-03.md)：历史发现，原行号对应修订前内容。
 - [修复对照](review-fixes-2026-10-03.md)：逐项修复与有限验证记录。
-- [实施步骤与里程碑](implementation-plan.md)：M0–M7 交付、依赖与验收门禁；M0 工程骨架已实施，待 Linux CI 验收，M1–M7 未开始。
+- [实施步骤与里程碑](implementation-plan.md)：M0–M7 交付、依赖与验收门禁；M0 待 Linux CI，M1 mutex 基线已完成本机门禁，Linux backend 验收待 CI，M2–M7 未开始。
 
 许可证沿用仓库现有 LICENSE，README 作为 W1 交付物补齐。无实测结果时不能以“已接受”表述并发正确性或性能已验收。

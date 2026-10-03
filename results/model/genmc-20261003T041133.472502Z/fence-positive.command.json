@@ -1,7 +1,0 @@
-[
-  "build/tools/genmc-v0.17.0-build/bin/genmc",
-  "-rc11",
-  "-print-error-trace",
-  "-dump-error-graph=/Users/richard/Desktop/magpie/results/model/genmc-20261003T041133.472502Z/fence-positive.error.dot",
-  "/Users/richard/Desktop/magpie/tools/model/probes/fence_message_passing.c"
-]

@@ -37,11 +37,14 @@ jobs:
         with:
           python-version: "3.x"
       - name: Configure
-        run: cmake --preset "${{ matrix.preset }}" -DCMAKE_CXX_COMPILER="${{ matrix.compiler }}"
+        run: cmake --preset "${{ matrix.preset }}" -DCMAKE_CXX_COMPILER="${{ matrix.compiler }}" -DMAGPIE_BUILD_BENCHMARKS=ON
       - name: Build
         run: cmake --build --preset "${{ matrix.preset }}" --parallel 2
       - name: Run fast tests
         run: python3 scripts/run_ctest.py --build-dir "build/${{ matrix.preset }}" --mode fast
+      - name: Benchmark harness smoke (no performance claim)
+        if: matrix.preset == 'release'
+        run: python3 scripts/run_benchmarks.py suite --binary "build/${{ matrix.preset }}/bench/magpie_bench" --repeat 1 --smoke --output "build/${{ matrix.preset }}/benchmark-smoke"
 
   macos:
     name: macOS / Release
@@ -52,7 +55,7 @@ jobs:
         with:
           python-version: "3.x"
       - name: Configure
-        run: cmake --preset release
+        run: cmake --preset release -DMAGPIE_BUILD_BENCHMARKS=ON
       - name: Build
         run: cmake --build --preset release --parallel 2
       - name: Run fast tests

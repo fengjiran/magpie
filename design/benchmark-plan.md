@@ -1,6 +1,6 @@
 # benchmark-plan：资源固定、路径分离与性能归因
 
-- 状态：**2026-10-03 审核修订版，暂无实测数据**。
+- 状态：**2026-10-03：M2 mutex harness、本机三变体 smoke 与代表配置开发冻结/同日重跑已完成；完整矩阵与正式基线待固定物理 Linux。**
 - 上位：[magpie设计方案.md](magpie设计方案.md) §13/§14/§16。
 - 修订：区分worker执行、本地spawn、外部全局提交及CallerRuns；采集提交门、epoch和WaitSlot扫描；删除半批overflow/TSC相关观测。
 
@@ -69,6 +69,12 @@ BULK_LIMIT {1,4,16,32,64,128}、STEAL_CAP {1,4,16,32,64,128}、SPIN {0,16,64,256
 避免benchmark自己共享一个热原子吞吐计数器；任务记录按线程预分配、末端聚合。driver不能隐式帮执行future任务。任务规模足够且测量窗口固定，短样本不作结论。
 
 ## 7. 阶段证据
+
+M2 当前程序、TSV 口径、资源控制、独立源码 commit/bundle、binary 校验与重跑入口见
+[benchmark 使用说明](../docs/benchmarks.md)；实际命令、结果与未关闭门禁见
+[M2 milestone](../docs/milestones/M2.md)。M1 无 local deque/EventCount，worker scaling、skew、notify scan 标为不适用。
+受控 queue/wrap/pool 只提供路径对照；目前未独立采样各共享 RMW，不用耗时相减宣称加性分解。
+`bench_shutdown_drain` 按有限存量完成，另列 window kind，不用 duration 截断任务。
 
 W1.7冻结基线；W2.2提交/producer路径；W2.4worker scaling/skew/fallback；W2.6六项与WaitSlot扫描；W2.7每条内存序放宽独立数据与模型/ARM64；W2.9槽布局对照；W2.10通知成本与重证；W2.8关闭CPU浪费。
 

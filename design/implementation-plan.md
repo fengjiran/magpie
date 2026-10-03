@@ -1,8 +1,8 @@
 # magpie 实施步骤与里程碑
 
 - 日期：2026-10-03。
-- 状态：**M0 工程骨架已实施；M0 待 Linux CI 验收。M1–M7 未开始**。
-- 范围：实施当前审核修订版线程池，形成正确性证据、冻结基线和首版交付。代码实施已从 M0 开始，线程池本体仍未实现。
+- 状态：**M0 待 Linux CI；M1 mutex 底座已通过本机验证、待平台/测试收口；M2 工程与本机开发冻结/同日重跑已完成、待物理 Linux 完整验收；M3–M7 未开始**。
+- 范围：实施当前审核修订版线程池，形成正确性证据、冻结基线和首版交付。M1 尚无 Linux pthread backend 原生验收；完整证据见 [M1 milestone](../docs/milestones/M1.md)。
 - 上位约束：[主设计](magpie设计方案.md)、[逐项修复对照](review-fixes-2026-10-03.md)、[测试计划](test-plan.md)、[benchmark 计划](benchmark-plan.md)。
 
 ## 1. 实施目标与顺序
@@ -43,7 +43,7 @@ flowchart LR
 
 ## 3. M0：工程骨架与验证环境
 
-当前进度（2026-10-03）：本机 macOS 三变体和静态/共享 consumer fast tests 通过；GenMC v0.17.0/LLVM 19.1.7 的 RC11 atomic/fence 正反探针通过。GitHub Actions 工作流已定义但尚未远端执行，故 M0 仍待 Linux CI 验收。完整记录见 [M0 证据](../results/milestones/M0.md)。
+当前进度（2026-10-03）：本机 macOS 三变体和静态/共享 consumer fast tests 通过；GenMC v0.17.0/LLVM 19.1.7 的 RC11 atomic/fence 正反探针通过。GitHub Actions 工作流已定义但尚未远端执行，故 M0 仍待 Linux CI 验收。完整记录见 [M0 证据](../docs/milestones/M0.md)。
 
 **目标：**让后续每个模块都有可编译、可测试、可诊断的工程入口。
 
@@ -61,13 +61,15 @@ flowchart LR
 
 - 工程目录、CMake 配置、CI 定义、基础测试入口。
 - 平台/工具链矩阵，模型工具能力和运行说明。
-- README 的开发构建命令与 `results/` 归档规则。
+- README 的开发构建命令与归档规则（`results/` 原始归档不随仓库跟踪）。
 
 退出门禁：空工程与最小库消费程序在声明支持的平台上构建通过；三变体可运行最小测试；工具和平台缺口显式登记。生产配置不能导出测试钩子。
 
 资源缺口处理：Linux 物理机暂缺允许继续 M1；不能关闭依赖真实 syscall 的 M5 或性能验收 M6。GenMC 工具 capability probe 已通过；deque/MPMC/EventCount 的项目专用模型仍须在对应 M4/M5 集成验收前完成。
 
 ## 4. M1：mutex 正确性底座
+
+当前实现进度（2026-10-03）：公共 API、mutex ring、拒绝策略、执行/owner scope、提交 Gate、pending/drain 握手、析构与构造回滚、worker/inline 统计以及 generic backend 已实现。最终本机结果为 Release fast 6/6、Release stress 1/1、TSan fast 5/5、ASan+UBSan fast 6/6；death suite 在 Release/ASan 独立进程运行且不进入 TSan。Linux `pthread_create`/属性源代码已实现但尚无 Linux 编译、CI 或原生运行结果。没有实现 M2 benchmark。完整命令和日志见 [M1 证据](../docs/milestones/M1.md)。
 
 **目标：**先得到语义完整、可独立使用的线程池，后续优化沿用这些公共协议。
 
@@ -96,6 +98,10 @@ flowchart LR
 交付：可用 mutex 版本、完整公共 API 测试、构造与生命周期诊断记录。高性能目标不是此阶段的退出条件。
 
 ## 5. M2：benchmark harness 与基线冻结
+
+当前进度（2026-10-03）：opt-in `magpie_bench`、warmup/固定窗口、预分配记录与分组直方图、CPU 秒、资源集合、独立进程重复/median/IQR、源码快照 commit/bundle、binary 校验和同日 replay 已实现。当前 M1 适用程序全部可运行；无本地队列的 worker scaling/skew 与无 EventCount 的 notify scan 不适用。macOS smoke/开发数据不关闭物理 Linux 完整矩阵门禁，逐项证据见 [M2 milestone](../docs/milestones/M2.md)。
+
+本机最终交付：三变体各 30 组 smoke、fast Release 8/8、TSan 7/7、ASan+UBSan 8/8；冻结源码 fresh Release fast/stress 通过。代表空任务配置完成初次 5 进程和原 binary 同日重跑 5 进程（每次 2s warmup/10s duration），源码 bundle 恢复与全部 hash 校核通过。完整长窗口矩阵和正式冻结尚待物理 Linux；本机重跑噪声不能忽略，不作性能达标结论。
 
 **目标：**在替换任何核心机制之前，取得可信的性能对照。
 
@@ -245,7 +251,7 @@ flowchart LR
 
 ## 12. 交付与证据管理
 
-每个里程碑建立 `results/milestones/Mx.md`，包含：
+每个里程碑建立 `docs/milestones/Mx.md`，包含：
 
 1. 状态、目标、实际源码 revision 和相对上一版的机制变更。
 2. 交付文件、公开 API 影响及对应 W/R 项目。
@@ -260,4 +266,4 @@ flowchart LR
 
 ## 13. 当前可执行的下一步
 
-从 **M0 工程骨架与验证环境**开始。其完成后进入 M1；当前没有必要扩充 NUMA、任务图或自定义 future。实施过程中以这份计划组织交付，以主设计和三个 ADR 决定协议，以测试和性能证据判定是否进入下一里程碑。
+当前可执行下一步是为 M1 运行 Linux CI，并复核 pthread stack/affinity fallback。该平台门禁通过后再进入 M2 冻结 mutex 基线；当前没有必要扩充 NUMA、任务图或自定义 future。实施过程中以这份计划组织交付，以主设计和三个 ADR 决定协议，以测试和性能证据判定是否进入下一里程碑。
