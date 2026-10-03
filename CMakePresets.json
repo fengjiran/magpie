@@ -51,6 +51,38 @@
         "MAGPIE_BUILD_BENCHMARKS": "ON",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       }
+    },
+    {
+      "name": "release-mpmc",
+      "inherits": "release",
+      "binaryDir": "${sourceDir}/build/release-mpmc",
+      "cacheVariables": {
+        "MAGPIE_QUEUE_BACKEND": "mpmc"
+      }
+    },
+    {
+      "name": "tsan-mpmc",
+      "inherits": "tsan",
+      "binaryDir": "${sourceDir}/build/tsan-mpmc",
+      "cacheVariables": {
+        "MAGPIE_QUEUE_BACKEND": "mpmc"
+      }
+    },
+    {
+      "name": "asan-ubsan-mpmc",
+      "inherits": "asan-ubsan",
+      "binaryDir": "${sourceDir}/build/asan-ubsan-mpmc",
+      "cacheVariables": {
+        "MAGPIE_QUEUE_BACKEND": "mpmc"
+      }
+    },
+    {
+      "name": "bench-mpmc",
+      "inherits": "bench",
+      "binaryDir": "${sourceDir}/build/bench-mpmc",
+      "cacheVariables": {
+        "MAGPIE_QUEUE_BACKEND": "mpmc"
+      }
     }
   ],
   "buildPresets": [
@@ -72,6 +104,26 @@
     {
       "name": "bench",
       "configurePreset": "bench",
+      "configuration": "Release"
+    },
+    {
+      "name": "release-mpmc",
+      "configurePreset": "release-mpmc",
+      "configuration": "Release"
+    },
+    {
+      "name": "tsan-mpmc",
+      "configurePreset": "tsan-mpmc",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "asan-ubsan-mpmc",
+      "configurePreset": "asan-ubsan-mpmc",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "bench-mpmc",
+      "configurePreset": "bench-mpmc",
       "configuration": "Release"
     }
   ],

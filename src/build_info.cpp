@@ -7,6 +7,8 @@ static_assert((MAGPIE_CACHE_LINE & (MAGPIE_CACHE_LINE - 1)) == 0);
 
 namespace magpie {
 
+const char* global_queue_backend() noexcept { return MAGPIE_BUILD_QUEUE_BACKEND; }
+
 BuildInfo build_info() noexcept {
     return {
         MAGPIE_BUILD_VERSION,

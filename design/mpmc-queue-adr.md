@@ -1,6 +1,6 @@
 # ADR-003：全局 MPMC——载荷、reservation hole 与弱 try 契约
 
-- 状态：**已修订，待实现验证（v2.0，2026-10-03）**。
+- 状态：**M3 原语与池候选已实现，本机验证与代表点开发对照已通过；默认 mutex，正式平台/性能门禁待关闭（2026-10-03）**。
 - 上位约束：[magpie设计方案.md](magpie设计方案.md) §7.2、§8、§10。
 - 修订：纠正 Task** 载荷/slot 作用域、满空与线性化表述、索引溢出和 oracle。旧版“已接受的系统级 lock-free FIFO”结论撤回。
 
@@ -14,7 +14,7 @@ MPMCQueue<T> 存储 T，池实例化 MPMCQueue<Task*>。enqueue(T)、dequeue(T&)
 
 ## 2. 协议与骨架
 
-代码唯一源为主设计 §7.2.1。Slot* 在重试循环外声明，break 后仍可访问。
+主设计 §7.2.1 定义协议；当前 production 实现为 `include/magpie/mpmc_queue.hpp`，测试与 C11 模型按该协议验证。Slot* 在重试循环外声明，break 后仍可访问。
 
 | 阶段 | 条件/操作 |
 |---|---|
@@ -54,7 +54,7 @@ DiscardOldest 只删除全局当前可取得头项，不承诺全池最老提交
 
 丢弃 packaged_task 的 future 以 broken_promise 就绪。正常执行/丢弃均先完成 Task 销毁再 pending--。
 
-成功的新任务发布后池层无条件 notify_one。队列不判 waiters、不维护近似深度，也不承担本地溢出半批转移。通知成本/闸门语义由 ADR-002 定义。
+成功的新任务发布后池层无条件 notify_one。M3 保留 condition_variable：worker 持停车 mutex 做最后 dequeue/退出复查及 wait，producer 在 seq 发布后取得同一 mutex 再通知；这把锁保护探测→睡眠握手，不包住常态 MPMC enqueue/dequeue。队列不判 waiters、不维护近似深度，也不承担本地溢出半批转移。通知成本/闸门语义由 ADR-002 定义。
 
 ## 6. 验证
 
@@ -78,3 +78,5 @@ DiscardOldest 只删除全局当前可取得头项，不承诺全池最老提交
 默认紧凑槽、头尾分行，W2.9 比较每槽一行。没有“256KB 必然超出 L2”的统一硬件断言。
 
 全局 producer/consumer 争用、gate/pending/submitted/epoch 均须采样；专用 bulk、分片或严格 FIFO 队列替换为独立 ADR，不能在局部优化时静默改变当前 API 恢复语义。
+
+M3 构建候选、实际 weak try/ownership、watchdog 和模型边界见 [MPMC 使用说明](../docs/mpmc-queue.md)；执行证据见 [M3 milestone](../docs/milestones/M3.md)。

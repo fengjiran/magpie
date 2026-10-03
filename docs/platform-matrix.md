@@ -32,3 +32,5 @@ Linux benchmark 编译/运行、资源固定和物理机完整矩阵仍待执行
 | 性能机器 | 固定物理 Linux CPU/亲和性/配额 | 资源未安排；M6 前置 |
 
 GenMC probe 不接受仅靠非零退出或 `assert` 文本作为负例成功：正例需有非零 complete-execution 计数及 no-errors 完成标记；负例需有 Safety violation、指定断言表达式和源行号、非空 error graph。该 capability probe 已在 macOS x86_64 实际通过；项目协议模型仍待 M4/M5。工具固定版本和语义边界见 [`../tools/model/README.md`](../tools/model/README.md)。
+
+M3 原语与 MPMC+CV 候选在 macOS x86_64 验证；Linux GCC/Clang 的双 backend CI 已配置、未原生执行。RC11 C11协议投影不覆盖 pthread ABI、C++全部语义或活性。默认保持mutex，见 [M3 milestone](milestones/M3.md)。

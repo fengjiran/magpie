@@ -39,3 +39,5 @@ Linux worker 使用 `pthread_create`。非零 `worker_stack_size` 小于 `PTHREA
 M1 worker 用 `std::condition_variable` 停车。stopping 谓词在与等待相同的 queue mutex 下修改；提交门和 pending 归零只在停止已发布时通知该队列条件变量。drain 使用独立 mutex/condition predicate handshake。`wakes` 统计 M1 的 condition-variable 通知调用；`wake_threads` 为空，因为该 backend 不能报告操作系统实际唤醒的 worker 数。
 
 测试 preset 构建单独的 `magpie_test_support` 静态库来驱动确定性交错。生产 `magpie` 目标不包含测试 hook 状态或符号。
+
+M3 可通过构建选项选择全局 MPMC 候选，默认仍 mutex。候选的 QueueFull 表示当前 slot 不可取得，可能存在 producer 未发布或 consumer 未释放窗口；DiscardOldest 不跳过未发布头，删除旧项后新项仍可能因竞争拒绝。控制/ownership/callback/future 契约继续适用，详情见 [MPMC 使用说明](mpmc-queue.md)。

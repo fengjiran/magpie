@@ -7,7 +7,7 @@
 
 本文件定义项目定位、组件职责、公开 API、关键原语骨架、所有权、关闭协议和验收。三个 ADR 补充协议依据；test-plan/benchmark-plan 分别定义正确性与性能证据。主设计与 ADR 冲突时先修正文档，不靠实现自行选择口径。
 
-当前实现是固定 worker + 全局有界 mutex ring 的 M1 基线，使用 condition_variable 停车。还没有 Chase-Lev、MPMC 或 EventCount；下文涉及这些原语的代码段仍是设计骨架。GenMC atomic/fence capability probe 不能替代项目原语模型、Linux pthread 原生验证、Linux futex、ARM64 或性能验收。
+当前实现是固定 worker + 全局有界 mutex ring 的 M1 基线，使用 condition_variable 停车。M3 已新增可选全局 MPMC + condition_variable 候选（默认仍 mutex），还没有 Chase-Lev 或 EventCount；下文涉及这些原语的代码段仍是设计骨架。GenMC atomic/fence capability probe 不能替代项目原语模型、Linux pthread 原生验证、Linux futex、ARM64 或性能验收。
 
 M2 已新增 opt-in benchmark harness、独立源码快照与基线重跑入口，未改变上述生产协议。
 测量边界与不适用维度见 [benchmark 使用说明](../docs/benchmarks.md)，实际验收状态见 [M2 milestone](../docs/milestones/M2.md)。
@@ -355,6 +355,8 @@ private:
 
 #### 7.2.1 载荷
 
+当前 M3 header 原语与编译候选已实现，默认切换仍受平台/性能门禁约束；使用与验证边界见 [MPMC 使用说明](../docs/mpmc-queue.md)。下文保留协议骨架，不将骨架编译当实现验收。
+
 MPMCQueue<T> 存 T；池实例化 MPMCQueue<Task*>，enqueue 接收 Task*，dequeue 通过 Task*& 输出。限定 T 为 trivially copyable 且默认可构造的非抛类型，认领后的数据读写不能抛。
 
 ~~~cpp
@@ -592,7 +594,7 @@ ExecutionFrame 链随 RAII 压入/恢复，所有嵌套帧都参与 require_exte
 2. 自旋/yield 等 in_flight_submitters.load(SC)==0；等待包括已过门 CallerRuns。
 3. evc.notify_all()。
 
-以上是目标 EventCount 协议。M1 mutex 变体在同一个 queue mutex 下写入 worker stopping 谓词并通知 queue condition_variable；worker 仅在 stopping、提交门为零、pending 为零同时成立时退出。stopping 时 Gate 的 1→0 与 pending 的 1→0 也在持 queue mutex 时广播；正常运行期间这两个归零转换不广播，任务发布仍只通知一个 worker。该变体允许关闭期停车，不等同于 EventCount 的注册/唤醒握手。
+以上是目标 EventCount 协议。M1 mutex 变体在同一个 queue mutex 下写入 worker stopping 谓词并通知 queue condition_variable；worker 仅在 stopping、提交门为零、pending 为零同时成立时退出。stopping 时 Gate 的 1→0 与 pending 的 1→0 也在持 queue mutex 时广播；正常运行期间这两个归零转换不广播，任务发布仍只通知一个 worker。该变体允许关闭期停车，不等同于 EventCount 的注册/唤醒握手。M3 MPMC 候选保留该停车协议：worker 常态先无停车锁 dequeue，失败后持锁再次 dequeue/退出裁决；producer seq 发布后取得同一 mutex 再通知，确保 reservation-hole 恢复不会落入探测到 wait 的丢唤醒窗口。
 
 允许多个外部线程调用，重复通知无害。停止后所有 submit 都被拒，包含已有任务再提交子项。任务须自行处理 ShuttingDown。已接受任务仍执行完。
 

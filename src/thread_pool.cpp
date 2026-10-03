@@ -2,6 +2,10 @@
 
 #include "worker_thread.hpp"
 
+#if defined(MAGPIE_USE_MPMC)
+#include "magpie/mpmc_queue.hpp"
+#endif
+
 #if defined(MAGPIE_ENABLE_TEST_HOOKS)
 #include "magpie/detail/test_hooks.hpp"
 #endif
@@ -28,6 +32,10 @@ enum class HookPoint {
     WorkerExit,
     BeforeWorkerCreate,
     ShutdownAfterStop,
+    MpmcEnqueueClaim,
+    MpmcDequeueClaim,
+    MpmcPublished,
+    MpmcRejectBeforeRollback,
 };
 #endif
 
@@ -153,7 +161,7 @@ void invoke_test_hook(HookPoint point, std::size_t index = 0) noexcept {
     }
     return 0;
 }
-#define MAGPIE_TEST_HOOK(point, index) invoke_test_hook(HookPoint::point, index)
+#define MAGPIE_TEST_HOOK(point, index) test_hook(HookPoint::point, index)
 #define MAGPIE_TEST_WORKER_CREATE_ERROR(index) test_worker_create_error(index)
 #else
 #define MAGPIE_TEST_HOOK(point, index) ((void)0)
@@ -164,6 +172,7 @@ void invoke_test_hook(HookPoint point, std::size_t index = 0) noexcept {
 
 struct ThreadPool::Impl {
     ThreadPool* owner;
+    struct TaskOwner;
 
     struct WorkerCtx {
         WorkerCtx(std::size_t worker_index, Impl* implementation)
@@ -190,11 +199,35 @@ struct ThreadPool::Impl {
         std::function<void(std::exception_ptr)> callback;
     };
 
+#if defined(MAGPIE_ENABLE_TEST_HOOKS)
+    void test_hook(HookPoint point, std::size_t index) noexcept {
+        const auto* hooks = test_hooks.load(std::memory_order_acquire);
+        if (hooks && hooks->on_snapshot) {
+            std::size_t enq = 0, deq = 0;
+#if defined(MAGPIE_USE_MPMC)
+            const auto positions = global_queue.positions_for_test();
+            enq = positions[0]; deq = positions[1];
+#endif
+            hooks->on_snapshot({stopping.load(), in_flight_submitters.load(), pending.load(), enq, deq}, hooks->context);
+        }
+        invoke_test_hook(point, index);
+    }
+#endif
+
     explicit Impl(ThreadPool* pool_owner, const ThreadPoolOptions& source)
         : owner(pool_owner), options(copy_and_validate_options(source)),
-          queue_capacity(normalize_capacity(options.global_queue_capacity, sizeof(Task*))),
+          queue_capacity(normalize_capacity(options.global_queue_capacity, global_slot_size)),
           local_capacity(normalize_capacity(options.local_deque_capacity, sizeof(Task*))),
-          worker_total(effective_worker_count(options.worker_count)), queue_slots(queue_capacity),
+          worker_total(effective_worker_count(options.worker_count)),
+#if defined(MAGPIE_USE_MPMC)
+          global_queue(queue_capacity
+#if defined(MAGPIE_ENABLE_TEST_HOOKS)
+                       , &queue_hooks
+#endif
+                       ),
+#else
+          queue_slots(queue_capacity),
+#endif
           handler(pool_owner, source.exception_handler) {
 
         const auto worker_limit = std::vector<std::unique_ptr<WorkerCtx>>{}.max_size();
@@ -338,6 +371,9 @@ struct ThreadPool::Impl {
         MAGPIE_TEST_HOOK(SubmitAfterGate, 0);
 
         add_pending();
+#if defined(MAGPIE_USE_MPMC)
+        submit_mpmc(task_owner);
+#else
         bool pending_reserved = true;
         Task* discarded_task = nullptr;
         bool queued = false;
@@ -395,7 +431,48 @@ struct ThreadPool::Impl {
             pending_reserved = false;
         }
         throw QueueFullError(QueueFullReason::QueueFull);
+#endif
     }
+
+#if defined(MAGPIE_USE_MPMC)
+    bool publish_mpmc(TaskOwner& task_owner) noexcept {
+        if (!global_queue.enqueue(task_owner.task)) { return false; }
+        // The consumer may already have deleted Task. Only overwrite the owner
+        // field; do not read/return the published pointer after successful try.
+        task_owner.forget();
+        increment_saturated(submitted);
+        // The last probe and CV wait hold this same mutex. Publication precedes
+        // acquiring it, so a reservation-hole recovery cannot lose its wake.
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        notify_queue_one();
+        return true;
+    }
+
+    void submit_mpmc(TaskOwner& task_owner) {
+        if (publish_mpmc(task_owner)) { return; }
+        increment_saturated(rejected);
+        if (is_worker_thread() || options.rejection == RejectionPolicy::CallerRuns) {
+            auto* task = task_owner.release();
+            increment_saturated(submitted);
+            run_one(task, false);
+            return;
+        }
+        if (options.rejection == RejectionPolicy::DiscardOldest) {
+            for (std::size_t retry = 0; retry < discard_retry_limit; ++retry) {
+                Task* dropped = nullptr;
+                if (!global_queue.discard_oldest(dropped)) { break; }
+                increment_saturated(discarded);
+                destroy_task(dropped);
+                dec_pending();
+                if (publish_mpmc(task_owner)) { return; }
+            }
+        }
+        MAGPIE_TEST_HOOK(MpmcRejectBeforeRollback, 0);
+        task_owner.destroy();
+        dec_pending();
+        throw QueueFullError(QueueFullReason::QueueFull);
+    }
+#endif
 
     void enter_gate() {
         auto current = in_flight_submitters.load(std::memory_order_seq_cst);
@@ -445,6 +522,7 @@ struct ThreadPool::Impl {
                 task = nullptr;
             }
         }
+        void forget() noexcept { task = nullptr; }
         [[nodiscard]] Task* release() noexcept {
             auto* result = task;
             task = nullptr;
@@ -497,32 +575,48 @@ struct ThreadPool::Impl {
         OwnerScope owner_scope(owner, &context);
         for (;;) {
             Task* task = nullptr;
-            {
+#if defined(MAGPIE_USE_MPMC)
+            if (!global_queue.dequeue(task)) {
                 std::unique_lock<std::mutex> lock(queue_mutex);
-                while (queue_size == 0 &&
-                    !(stopping.load(std::memory_order_seq_cst) &&
-                      in_flight_submitters.load(std::memory_order_seq_cst) == 0 &&
-                       pending.load(std::memory_order_acquire) == 0)) {
+                for (;;) {
+                    if (global_queue.dequeue(task)) { break; }
+                    if (can_exit()) { break; }
                     MAGPIE_TEST_HOOK(WorkerBeforeWait, context.index);
                     queue_cv.wait(lock);
                 }
-                if (queue_size == 0 && stopping.load(std::memory_order_seq_cst) &&
-                    in_flight_submitters.load(std::memory_order_seq_cst) == 0 &&
-                    pending.load(std::memory_order_acquire) == 0) {
-                    break;
+                if (task == nullptr) { break; }
+            }
+#else
+            {
+                std::unique_lock<std::mutex> lock(queue_mutex);
+                while (queue_size == 0 && !can_exit()) {
+                    MAGPIE_TEST_HOOK(WorkerBeforeWait, context.index);
+                    queue_cv.wait(lock);
                 }
+                if (queue_size == 0 && can_exit()) { break; }
                 task = dequeue_locked();
             }
+#endif
+            // All queue operations and the parking mutex are finished first.
             run_one(task, true);
         }
         MAGPIE_TEST_HOOK(WorkerExit, context.index);
     }
 
+    bool can_exit() const noexcept {
+        return stopping.load(std::memory_order_seq_cst) &&
+            in_flight_submitters.load(std::memory_order_seq_cst) == 0 &&
+            pending.load(std::memory_order_acquire) == 0;
+    }
+
+#if !defined(MAGPIE_USE_MPMC)
     void enqueue_locked(Task* task) noexcept {
         queue_slots[queue_tail] = task;
         queue_tail = (queue_tail + 1) % queue_capacity;
         ++queue_size;
     }
+
+#endif
 
     void notify_queue_one() noexcept {
         queue_cv.notify_one();
@@ -534,6 +628,7 @@ struct ThreadPool::Impl {
         increment_saturated(wakes);
     }
 
+#if !defined(MAGPIE_USE_MPMC)
     [[nodiscard]] Task* dequeue_locked() noexcept {
         auto* task = queue_slots[queue_head];
         queue_slots[queue_head] = nullptr;
@@ -542,15 +637,33 @@ struct ThreadPool::Impl {
         return task;
     }
 
+#endif
+
     ThreadPoolOptions options;
     const std::size_t queue_capacity;
     const std::size_t local_capacity;
     const std::size_t worker_total;
+#if defined(MAGPIE_USE_MPMC)
+    static constexpr auto global_slot_size = MPMCQueue<Task*>::slot_size;
+    static constexpr std::size_t discard_retry_limit = 2;
+#if defined(MAGPIE_ENABLE_TEST_HOOKS)
+    detail::MpmcTestHooks queue_hooks{
+        [](std::size_t position, void* context) noexcept { static_cast<Impl*>(context)->test_hook(HookPoint::MpmcEnqueueClaim, position); },
+        [](std::size_t position, void* context) noexcept { static_cast<Impl*>(context)->test_hook(HookPoint::MpmcDequeueClaim, position); },
+        this,
+        [](std::size_t position, void* context) noexcept { static_cast<Impl*>(context)->test_hook(HookPoint::MpmcPublished, position); }};
+#endif
+    MPMCQueue<Task*> global_queue;
+#else
+    static constexpr auto global_slot_size = sizeof(Task*);
     std::vector<Task*> queue_slots;
+#endif
     std::vector<std::unique_ptr<WorkerCtx>> workers;
+#if !defined(MAGPIE_USE_MPMC)
     std::size_t queue_head = 0;
     std::size_t queue_tail = 0;
     std::size_t queue_size = 0;
+#endif
     mutable std::mutex queue_mutex;
     std::condition_variable queue_cv;
     std::atomic<bool> stopping{false};

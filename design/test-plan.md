@@ -62,7 +62,9 @@ L1 随机守恒 + L2 确定性缝 + L3 小历史/弱内存有界模型。模型�
 | deque steal | 候选读取完成、CAS前 | StealAcrossOwnerPops / StealFromFullDequeDeterministic |
 | deque pop | 最后项expected已读、CAS前 | LastElementCasFailureRestoresBottom |
 | MPMC enqueue | position CAS后、seq发布前 | ProducerClaimStall |
-| MPMC dequeue | position CAS后、seq释放前 | ConsumerClaimStall |
+| MPMC dequeue | position CAS后、seq释放前 | ConsumerClaimStall / ConsumerReservationMakesSlotUnavailable |
+| pool MPMC publication | seq发布后、通知前 | ProducerHoleRecoveryNotifiesParkedWorker |
+| pool MPMC reject | 最终 unavailable 后、销毁/回退前 | RejectionRollbackZeroNotifiesWaitingDrainer |
 | block_on_eventcount | 可选前置stop检查后、prepare前 | ShutdownBeforeRegistration |
 | EventCount enter | waiters++后、Waiting写前 | ConcurrentNotifyRegistration |
 | registered stop | stop检查false后 | ShutdownAfterRegisteredCheck |
@@ -95,6 +97,10 @@ T1 watchdog 默认10s，T2 120s，T3由外层job限制；可按工具链调整�
 |---|---|
 | deque_test.cpp | PushPopSequential、TwoThreadPushSteal、LastElementRaceStress、StealAcrossOwnerPops、LastElementCasFailureRestoresBottom、StealFromFullDequeDeterministic、StealFromFullDequeStress、DifferentialRandomOps、LinearizabilitySmoke、DequeIndexLimit |
 | mpmc_queue_test.cpp | SingleThreadFifo、WrapAround、MultiProdMultiCons、ProducerClaimStall、ConsumerClaimStall、RelaxedQueueHistory、MpmcIndexLimit |
+| mpmc_queue_stress_test.cpp | MultiProdMultiCons（1M ID） |
+| mpmc_queue_death_test.cpp | MpmcIndexLimit、NullPointerPayload（Release/ASan，TSan排除） |
+| pool_mpmc_test.cpp | ProducerHoleRecoveryNotifiesParkedWorker、DiscardDoesNotSkipUnpublishedHead、ConsumerReservationMakesSlotUnavailable、DiscardRetryExhaustionRollsBackNewTask、RejectionRollbackZeroNotifiesWaitingDrainer、DiscardUnderLoad |
+| support/watchdog_probe.cpp / check_watchdog.py | 强制超时，精确状态marker和退出124，非fork/death，三个变体同测 |
 | event_count_test.cpp | SeparateWaitWords、WakeBeforeKernelWait、ShutdownBeforeRegistration、ShutdownAfterRegisteredCheck、ConcurrentNotifyRegistration、RegistrationBalanced、EpochLimit、SpuriousWake、GenericPredicateHandshake |
 | pool_test.cpp | SubmitAndDrain、StatsQuiescentIdentity、FutureException、ExceptionHandlerCannotSynchronouslyControlItsPool、PoolOwnedHandlerCaptureDestructorHasExecutionGuard、RejectionPoliciesCallerRuns、RejectionRollbackNotifies、DiscardedFutureBrokenPromise、SubmitAfterShutdownReportsReason、ShutdownGateRace、DrainNotifyRace、CallerRunsControlGuard、WorkerControlGuard、WorkerSubmitsChild、WorkerFullQueueFallsBackToCallerRunsUnderAbortPolicy、CapturedDestructorControlGuard、ExecutedCaptureDestructorRunsInsideExecutionFrame、NestedExecutionControlGuard、ConstructorFailureRollback、ConstructorFailureDestroysPoolOwnedHandlerUnderGuard、OptionsValidation |
 | pool_death_test.cpp | DestructorControlGuardDeath |
@@ -102,7 +108,7 @@ T1 watchdog 默认10s，T2 120s，T3由外层job限制；可按工具链调整�
 | api_compile_test.cpp | `TaskCallable` compile-time positive/negative assertions；AcceptsLvalueOnlyAndMoveOnlyCallables |
 | bench/harness_test.cpp、bench/test_runner.py | M2 opt-in：直方图边界/overflow、保守 quantile、完成样本分组、静止计数失败、独立进程统计、配置身份、损坏归档拒绝与禁止覆盖 |
 
-此表中的 deque、MPMC、EventCount 用例仍对应后续里程碑，尚未实现。提交门/DrainNotifyRace/部分构造失败交错在测试 preset 的独立 `magpie_test_support` 中启用；production `magpie` 不编译测试 hooks。DeathTest 独立进程运行，TSan 构建不生成或运行该 suite。
+M3 的 MPMC 原语及池候选用例已实现；deque/EventCount 仍对应后续里程碑。提交门/DrainNotifyRace/部分构造失败交错在测试 preset 的独立 `magpie_test_support` 中启用；production `magpie` 不编译测试 hooks。DeathTest 独立进程运行，TSan 构建不生成或运行该 suite。
 
 R1/R2必须精确强制审核反例顺序。R3/R4在本地容量16/1024、全局滿、有限子任务递归下验证旧项仍保留、新项执行和pending守恒，不再依赖overflow缓冲。
 
@@ -133,3 +139,5 @@ W2.7内存序放宽要求ARM64物理机或云机实测，并保留工具链/日�
 ## 10. 门禁
 
 工作项对应正式用例×工具变体全绿、模型输入/结果归档，才可关闭。M0 已有 build-info/静态共享 consumer 基础用例，GenMC atomic/fence capability probe 也已归档；这不覆盖 ThreadPool 协议。M1 已有真实池 fast/stress 用例与本机结果，Linux 平台、拒绝回退归零通知的精确交错和超时状态 dump 仍待收口；W2 原语用例未实现。M2 benchmark smoke 检查 harness，不证明池协议或性能。benchmark 门槛、Linux、ARM64 或 soak 缺证据必须明确列为待验证，不以文档变更冒充完成。
+
+M3 的 success oracle 同时校核所有 id 恰一次和 producer/consumer claim position→id 配对；false unavailable 不套严格 FIFO 空/满规格。新用例 watchdog 读取 atomics/最后 hook snapshot，原生全线程堆栈 dump 仍待平台补齐；快照不是同时刻不变量 oracle。详见 [M3 milestone](../docs/milestones/M3.md)。

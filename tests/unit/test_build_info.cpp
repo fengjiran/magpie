@@ -17,6 +17,7 @@ TEST(BuildInfoTest, ReportsTheConfigurationUsedToBuildTheLibrary) {
     EXPECT_STREQ(info.build_type, MAGPIE_BUILD_TYPE);
     EXPECT_STREQ(info.sanitizer, MAGPIE_BUILD_SANITIZER);
     EXPECT_EQ(info.cache_line_size, MAGPIE_CACHE_LINE);
+    EXPECT_STREQ(magpie::global_queue_backend(), MAGPIE_BUILD_QUEUE_BACKEND);
 }
 
 TEST(BuildInfoTest, CachelineConfigurationIsPowerOfTwo) {

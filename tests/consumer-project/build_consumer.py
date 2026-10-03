@@ -23,6 +23,7 @@ def main() -> int:
     parser.add_argument("--sanitizer", required=True)
     parser.add_argument("--cache-line", required=True)
     parser.add_argument("--shared", choices=("ON", "OFF"), required=True)
+    parser.add_argument("--queue-backend", choices=("mutex", "mpmc"), default="mutex")
     args = parser.parse_args()
 
     configure = [
@@ -34,6 +35,7 @@ def main() -> int:
         f"-DMAGPIE_SANITIZER={args.sanitizer}",
         f"-DMAGPIE_CACHE_LINE={args.cache_line}",
         f"-DMAGPIE_BUILD_SHARED={args.shared}",
+        f"-DMAGPIE_QUEUE_BACKEND={args.queue_backend}",
         f"-DMAGPIE_EXPECT_SHARED={args.shared}",
         "-DBUILD_TESTING=OFF",
     ]

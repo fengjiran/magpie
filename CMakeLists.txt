@@ -16,6 +16,13 @@ option(MAGPIE_ENABLE_TEST_HOOKS
     "Build a separate deterministic-test library with pool interleaving hooks"
     OFF)
 
+# MPMC remains a candidate until native correctness/performance gates close.
+set(MAGPIE_QUEUE_BACKEND "mutex" CACHE STRING "Global queue: mutex or mpmc")
+set_property(CACHE MAGPIE_QUEUE_BACKEND PROPERTY STRINGS mutex mpmc)
+if(NOT MAGPIE_QUEUE_BACKEND MATCHES "^(mutex|mpmc)$")
+    message(FATAL_ERROR "MAGPIE_QUEUE_BACKEND must be mutex or mpmc")
+endif()
+
 set(MAGPIE_SANITIZER "none" CACHE STRING "Sanitizer configuration: none, thread, or address-undefined")
 set_property(CACHE MAGPIE_SANITIZER PROPERTY STRINGS none thread address-undefined)
 
@@ -66,6 +73,9 @@ target_include_directories(magpie
         $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>
 )
 target_compile_definitions(magpie PRIVATE MAGPIE_BUILDING_LIBRARY)
+if(MAGPIE_QUEUE_BACKEND STREQUAL "mpmc")
+    target_compile_definitions(magpie PRIVATE MAGPIE_USE_MPMC=1)
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_compile_definitions(magpie PRIVATE _GNU_SOURCE=1)
 endif()
@@ -79,7 +89,11 @@ if(MAGPIE_ENABLE_TEST_HOOKS)
     target_compile_features(magpie_test_support PUBLIC cxx_std_20)
     target_include_directories(magpie_test_support
         PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+               $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>
     )
+    if(MAGPIE_QUEUE_BACKEND STREQUAL "mpmc")
+        target_compile_definitions(magpie_test_support PRIVATE MAGPIE_USE_MPMC=1)
+    endif()
     target_compile_definitions(magpie_test_support
         PRIVATE MAGPIE_BUILDING_LIBRARY MAGPIE_ENABLE_TEST_HOOKS=1
         PUBLIC MAGPIE_STATIC_DEFINE

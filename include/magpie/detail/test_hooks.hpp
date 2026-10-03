@@ -18,6 +18,10 @@ enum class PoolTestHookPoint {
     WorkerExit,
     BeforeWorkerCreate,
     ShutdownAfterStop,
+    MpmcEnqueueClaim,
+    MpmcDequeueClaim,
+    MpmcPublished,
+    MpmcRejectBeforeRollback,
 };
 
 struct PoolTestHooks {
@@ -25,6 +29,11 @@ struct PoolTestHooks {
         nullptr;
     int (*before_worker_create)(std::size_t index, void* context) noexcept = nullptr;
     void* context = nullptr;
+    struct Snapshot {
+        bool stopping;
+        std::size_t gate, pending, enqueue_position, dequeue_position;
+    };
+    void (*on_snapshot)(const Snapshot& state, void* context) noexcept = nullptr;
 };
 
 MAGPIE_EXPORT void install_pool_test_hooks(const PoolTestHooks* hooks) noexcept;

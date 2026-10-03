@@ -17,7 +17,7 @@ on:
 
 jobs:
   linux:
-    name: Linux / ${{ matrix.preset }} / ${{ matrix.compiler }}
+    name: Linux / ${{ matrix.preset }} / ${{ matrix.compiler }} / ${{ matrix.queue }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -25,19 +25,35 @@ jobs:
         include:
           - preset: release
             compiler: g++
+            queue: mutex
           - preset: tsan
             compiler: g++
+            queue: mutex
           - preset: asan-ubsan
             compiler: g++
+            queue: mutex
           - preset: release
             compiler: clang++
+            queue: mutex
+          - preset: release
+            compiler: g++
+            queue: mpmc
+          - preset: tsan
+            compiler: g++
+            queue: mpmc
+          - preset: asan-ubsan
+            compiler: g++
+            queue: mpmc
+          - preset: release
+            compiler: clang++
+            queue: mpmc
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
       - name: Configure
-        run: cmake --preset "${{ matrix.preset }}" -DCMAKE_CXX_COMPILER="${{ matrix.compiler }}" -DMAGPIE_BUILD_BENCHMARKS=ON
+        run: cmake --preset "${{ matrix.preset }}" -DCMAKE_CXX_COMPILER="${{ matrix.compiler }}" -DMAGPIE_BUILD_BENCHMARKS=ON -DMAGPIE_QUEUE_BACKEND="${{ matrix.queue }}"
       - name: Build
         run: cmake --build --preset "${{ matrix.preset }}" --parallel 2
       - name: Run fast tests

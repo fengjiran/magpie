@@ -1,6 +1,6 @@
 # magpie
 
-magpie 是一个面向 C++20 的固定 worker 工作窃取线程池。当前交付的是 M1 mutex 正确性底座：固定 worker、全局有界队列、拒绝策略、future、关闭与排空语义已实现。Chase-Lev、MPMC 和 EventCount 尚未接入；当前版本不提供工作窃取快路径。
+magpie 是一个面向 C++20 的固定 worker 工作窃取线程池。当前交付的是 M1 mutex 正确性底座：固定 worker、全局有界队列、拒绝策略、future、关闭与排空语义已实现。M3 已提供可选 MPMC + condition_variable 候选（默认仍为 mutex）；Chase-Lev 和 EventCount 尚未接入；当前版本不提供工作窃取快路径。
 
 ## 开发构建
 
@@ -56,3 +56,5 @@ macOS 数据只供开发；M2 完整矩阵与正式冻结仍待固定物理 Linu
 每个里程碑的环境、revision、命令、结果和未关闭门禁记录在 `docs/milestones/Mx.md`；原始日志与性能数据归档在本机 `results/`（不随仓库跟踪）。新运行使用新的原始日志文件，不覆盖既有结果；提交报告时记录实际源码 revision、编译器、平台、构建变体和测试标签。M0、M1 与 M2 记录分别见 [`docs/milestones/M0.md`](docs/milestones/M0.md)、[`docs/milestones/M1.md`](docs/milestones/M1.md) 与 [`docs/milestones/M2.md`](docs/milestones/M2.md)。
 
 许可证为 Apache-2.0，见 [`LICENSE`](LICENSE)。项目不承诺跨版本 ABI/符号兼容；发布说明将明确变更范围。
+
+M3 的原语 API、候选构建和 weak try/关闭边界见 [docs/mpmc-queue.md](docs/mpmc-queue.md)，实际门禁状态见 [M3 milestone](docs/milestones/M3.md)。

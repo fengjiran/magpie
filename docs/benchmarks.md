@@ -84,3 +84,11 @@ git clone results/milestones/m2-baseline-NEW/source.bundle /tmp/magpie-baseline
 ```
 
 M2 只冻结 correctness 基线与测量机制，不关闭主设计的六项性能门槛；正式报告继续按 benchmark-plan 五问解释数据和成本转移。
+
+## M3 候选对照
+
+`bench_submit_path --mode mpmc` 测量真实 header MPMC 原语，载荷为同一个有效 borrowed marker，单 consumer、producer 供给、无用户任务执行；`--mode queue` 是对应 mutex fixture。两端使用相同模式，完成后逐项守恒检查，CTest 有单独 routing smoke。capacity 是同样的消息槽数，MPMC Slot 含 seq/data（Task* 时16 bytes），mutex 指针槽8 bytes，`queue_slot_bytes` 明确记录额外 footprint。
+
+完整池只由库的编译 backend 决定，`global_queue_backend()` 给 TSV 的 `generic/pthread-mutex/mpmc-cv` 标签；旧 M2 frozen binary 的 mutex 标签保持不变。同机器/config 的原 binary 复跑和候选运行必须校核各自 checksum、commit/source identity。两种弱/强 unavailable 频率会影响拒绝数，应同时报告 attempts/accepted/refused 和 worker/inline，不按逻辑深度推导 full。
+
+M3 仍需通知 mutex 与 gate/pending/submitted/alloc，没有 epoch。本机对照只用于机制研究，固定物理 Linux/完整资源与矩阵缺口仍然存在。具体数据、失败现场与五问见 [M3 milestone](milestones/M3.md)。

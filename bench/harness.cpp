@@ -1,6 +1,7 @@
 #include "harness.hpp"
 
 #include <magpie/build_info.hpp>
+#include <magpie/mpmc_queue.hpp>
 
 #include <algorithm>
 #include <cmath>
@@ -83,7 +84,7 @@ Config parse_config(int argc, char** argv) {
     Config c;
     if (argc == 2 && std::string_view(argv[1]) == "--help") {
         std::cout
-            << "magpie_bench --program NAME --mode pool|queue|wrap|same|cross|async|thread\n"
+            << "magpie_bench --program NAME --mode pool|queue|mpmc|wrap|same|cross|async|thread\n"
                "  --workers N --producers N --capacity N --payload empty|cpu|memory|atomic|sleep\n"
                "  --warmup SEC --duration SEC --arrival-rate TASKS_PER_SEC --seed N\n"
                "  --rejection abort|caller-runs --work N --sample-stride N --sample-capacity N\n"
@@ -171,7 +172,7 @@ Config parse_config(int argc, char** argv) {
     }
     std::vector<std::string> modes{"pool"};
     if (c.program == "bench_submit_path") {
-        modes = {"pool", "queue", "wrap"};
+        modes = {"pool", "queue", "mpmc", "wrap"};
     }
     if (c.program == "bench_alloc_cost") {
         modes = {"same", "cross"};
@@ -185,7 +186,7 @@ Config parse_config(int argc, char** argv) {
     if (c.program == "bench_empty_task" && (c.payload != "empty" || c.rejection != "abort")) {
         throw std::invalid_argument("empty-task requires empty payload and Abort");
     }
-    if ((c.mode == "queue" || c.mode == "cross") && c.workers != 1) {
+    if ((c.mode == "queue" || c.mode == "mpmc" || c.mode == "cross") && c.workers != 1) {
         throw std::invalid_argument("controlled queue requires exactly one consumer");
     }
     if ((c.program == "bench_burst" || c.program == "bench_shutdown_drain" ||
@@ -349,10 +350,10 @@ void print_result(const Config& c, const Result& r) {
     put("mode", c.mode);
     put("config_hash", c.config_id);
     const bool execution = c.mode == "pool" || c.mode == "async" || c.mode == "thread";
-    const bool ring = c.mode == "pool" || c.mode == "queue" || c.mode == "cross";
-    put("backend", c.mode == "pool" ? (std::string(info.platform) == "Linux" ? "pthread-mutex-cv"
-                                                                             : "generic-mutex-cv")
-                                    : c.mode);
+    const bool ring = c.mode == "pool" || c.mode == "queue" || c.mode == "mpmc" || c.mode == "cross";
+    put("backend", c.mode == "pool" ?
+        (std::string(info.platform) == "Linux" ? "pthread-" : "generic-") +
+            std::string(global_queue_backend()) + "-cv" : c.mode);
     put("window_kind", c.program == "bench_shutdown_drain" ? "finite-inventory" : "fixed-time");
     put("latency_definition",
         c.program == "bench_shutdown_drain" ? "task-body-wall" : "submit-before-wrap-to-body-end");
@@ -364,6 +365,7 @@ void print_result(const Config& c, const Result& r) {
     put("worker_count", c.workers);
     put("producer_cpus", cpus_text(c.producer_cpus));
     put("worker_cpus", cpus_text(c.worker_cpus));
+    put("queue_slot_bytes", ring ? ((c.mode == "mpmc" || (c.mode == "pool" && std::string(global_queue_backend()) == "mpmc")) ? MPMCQueue<Task*>::slot_size : sizeof(Task*)) : 0);
     put("global_slots", ring ? c.capacity : 0);
     put("local_slots", 0);
     put("total_slots", ring ? c.capacity : 0);

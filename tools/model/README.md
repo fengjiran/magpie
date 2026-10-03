@@ -21,3 +21,15 @@ python3 tools/model/run_genmc_probes.py \
 - 本机 capability probe 已通过。结果目录 `results/model/genmc-20261003T041133.472502Z/`（不随仓库跟踪）保存了 GenMC v0.17.0 commit、LLVM 19.1.7、完整命令、输出、RC11 探索数、断言 trace 和 DOT graph。首轮执行因 runner 对断言错误格式要求过窄而失败，原始日志保留在 `results/model/genmc-20261003T041011.380988Z/`；修订后的判据依据固定版本 trace，通过后才关闭 capability probe。
 
 固定版本来源：[GenMC v0.17.0](https://github.com/MPI-SWS/genmc/tree/v0.17.0)、[该版本 CLI 手册](https://github.com/MPI-SWS/genmc/blob/v0.17.0/doc/manual/cli.md)。手册提供 `-rc11` 参数（并说明它是默认 memory model）和 `-dump-error-graph=<file>`；探针显式传入两者。该版本实测输出先报告 `Safety violation`，再在 trace 中列出原始 `assert(...)` 和源行；脚本据此校验完整上下文。升级工具版本时重新审查 CLI、LLVM 要求和模型边界，并更新固定版本与探针结果。
+
+## M3 MPMC 协议投影
+
+```sh
+python3 tools/model/run_mpmc_models.py \
+  --genmc build/tools/genmc-v0.17.0-build/bin/genmc \
+  --output-dir results/m3/NEW_RC11_RUN
+```
+
+复用本机已验证的 GenMC0.17.0/LLVM19.1.7，不升级或安装工具。`mpmc/queue.c` 将当前 header 的 relaxed position CAS、seq acquire/release、普通 data 和 weak try 分支投影为 C11。容量2、2 producer、1/2 consumer、最多3个 accepted ticket，含物理槽复用；main join 后校核 accepted 与 consumed ID。记录 complete 和 blocked executions，blocked 不当作已验证活性。
+
+负例只将 seq release 移到普通 payload 写之前；runner 必须看到精确 Non-atomic race 分类、marker 指定写入源行/slot data 和非空 DOT，不能把任意前端错误当反例。归档记录模型、header 和 runner hash。生产 header 的分配、type traits、指针 ownership、64位/溢出 guard 不在 C11 模型中，另用实际 C++ 正式测试；这不是完整 C++ implementation 的模型证明。

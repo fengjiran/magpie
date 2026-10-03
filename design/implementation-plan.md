@@ -1,7 +1,7 @@
 # magpie 实施步骤与里程碑
 
 - 日期：2026-10-03。
-- 状态：**M0 待 Linux CI；M1 mutex 底座已通过本机验证、待平台/测试收口；M2 工程与本机开发冻结/同日重跑已完成、待物理 Linux 完整验收；M3–M7 未开始**。
+- 状态：**M0 待 Linux CI；M1 mutex 底座已通过本机验证、待平台/测试收口；M2 工程与本机开发冻结/同日重跑已完成、待物理 Linux 完整验收；M3 原语/池候选及本机开发验证/对照已完成、正式门禁待关闭；M4–M7 未开始**。
 - 范围：实施当前审核修订版线程池，形成正确性证据、冻结基线和首版交付。M1 尚无 Linux pthread backend 原生验收；完整证据见 [M1 milestone](../docs/milestones/M1.md)。
 - 上位约束：[主设计](magpie设计方案.md)、[逐项修复对照](review-fixes-2026-10-03.md)、[测试计划](test-plan.md)、[benchmark 计划](benchmark-plan.md)。
 
@@ -121,6 +121,8 @@ flowchart LR
 后续比较注意：mutex 单队列和本地队列版本的总缓冲量可能不同，必须同时记录 global/local/总槽数与 inline 比例。不能将更大缓存或更多 producer 执行资源的收益误归因于原语本身。
 
 ## 6. M3：全局 MPMC 原语与池内替换
+
+当前进度（2026-10-03）：header 原语、mutex/mpmc 编译选择、CV 适配、weak try 历史与两个 reservation hole、discard/拒绝归零通知回归及 RC11 C11 协议投影已实施。最终本机fast Release两backend13/13、TSan11/11、ASan+UBSan13/13，stress各2/2；原frozen binary同日对照与producer1/4的primitive/pool代表点已归档。默认保留 mutex；平台/性能门禁尚未关闭。实际结果见 [M3 milestone](../docs/milestones/M3.md)。
 
 **目标：**只替换全局队列，保持公共协议及停车机制不变。
 

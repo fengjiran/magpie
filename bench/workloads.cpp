@@ -1,4 +1,5 @@
 #include "harness.hpp"
+#include <magpie/mpmc_queue.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -319,8 +320,11 @@ class ControlledRing {
 Result controlled_run(const Config& c, double duration) {
     pin_current(c.producer_cpus, 0);
     const bool cross = c.mode == "cross";
-    const bool queue = c.mode == "queue" || cross;
+    const bool mpmc = c.mode == "mpmc";
+    const bool queue = c.mode == "queue" || mpmc || cross;
     ControlledRing ring(c.capacity);
+    magpie::MPMCQueue<Task*> atomic_ring(c.capacity);
+    auto pop = [&](Task*& value) { return mpmc ? atomic_ring.dequeue(value) : ring.pop(value); };
     TaskImpl<EmptyCallable> marker(EmptyCallable{});
     std::vector<ProducerResult> producers(c.producers);
     std::atomic<std::size_t> done{0};
@@ -343,7 +347,7 @@ Result controlled_run(const Config& c, double duration) {
                 start.wait();
                 for (;;) {
                     Task* task = nullptr;
-                    if (ring.pop(task)) {
+                    if (pop(task)) {
                         if (cross) {
                             delete task;
                         } else {
@@ -353,7 +357,7 @@ Result controlled_run(const Config& c, double duration) {
                     } else if (done.load(std::memory_order_acquire) == c.producers) {
                         // The last producer may have pushed after the empty
                         // observation. Acquire the completion flag, then probe again.
-                        if (!ring.pop(task)) {
+                        if (!pop(task)) {
                             break;
                         }
                         if (cross) {
@@ -385,14 +389,14 @@ Result controlled_run(const Config& c, double duration) {
                             ++p.attempts;
                             // Queue-only uses a stable non-owning sentinel, never dereferenced.
                             std::unique_ptr<Task> task;
-                            if (c.mode != "queue") {
+                            if (c.mode != "queue" && !mpmc) {
                                 task = std::make_unique<TaskImpl<EmptyCallable>>(EmptyCallable{});
                             }
                             if (!queue) {
                                 keep_result(reinterpret_cast<std::uintptr_t>(task.get()));
                                 ++p.accepted;
                             } else if (cross ? ring.push_owned(task)
-                                             : ring.push_borrowed(&marker)) {
+                                             : (mpmc ? atomic_ring.enqueue(&marker) : ring.push_borrowed(&marker))) {
                                 ++p.accepted;
                             } else {
                                 ++p.refused;
@@ -678,7 +682,7 @@ Result run(const Config& c, double duration, bool measured) {
     if (c.program == "bench_shutdown_drain") {
         return shutdown_run(c);
     }
-    if (c.program == "bench_alloc_cost" || c.mode == "queue" || c.mode == "wrap") {
+    if (c.program == "bench_alloc_cost" || c.mode == "queue" || c.mode == "mpmc" || c.mode == "wrap") {
         return controlled_run(c, duration);
     }
     if (c.program == "bench_baselines") {

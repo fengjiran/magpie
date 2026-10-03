@@ -13,6 +13,8 @@ if(NOT TARGET GTest::gtest_main)
     FetchContent_MakeAvailable(googletest)
 endif()
 
+
+
 add_executable(magpie_consumer_smoke consumer/main.cpp)
 target_link_libraries(magpie_consumer_smoke PRIVATE magpie::magpie)
 magpie_apply_project_defaults(magpie_consumer_smoke)
@@ -38,6 +40,7 @@ foreach(_linkage IN ITEMS static shared)
             --sanitizer "${MAGPIE_SANITIZER}"
             --cache-line "${MAGPIE_CACHE_LINE}"
             --shared "${_shared_option}"
+            --queue-backend "${MAGPIE_QUEUE_BACKEND}"
     )
     set_tests_properties(magpie.consumer-project.${_linkage} PROPERTIES LABELS fast TIMEOUT 300)
 endforeach()
@@ -101,4 +104,41 @@ if(MAGPIE_BUILD_BENCHMARKS)
     add_test(NAME magpie.benchmark-runner
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/bench/test_runner.py")
     set_tests_properties(magpie.benchmark-runner PROPERTIES LABELS fast TIMEOUT 20)
+endif()
+
+# Header-only primitive test instantiations use uint64_t/int, not the pool's
+# production Task* specialization. Hooks are confined to these test binaries.
+magpie_add_test_suite(magpie_mpmc_tests fast unit/mpmc_queue_test.cpp)
+target_compile_definitions(magpie_mpmc_tests PRIVATE MAGPIE_ENABLE_TEST_HOOKS=1)
+set_tests_properties(magpie_mpmc_tests PROPERTIES TIMEOUT 20)
+magpie_add_test_suite(magpie_mpmc_stress_tests stress unit/mpmc_queue_stress_test.cpp)
+target_compile_definitions(magpie_mpmc_stress_tests PRIVATE MAGPIE_ENABLE_TEST_HOOKS=1)
+if(NOT MAGPIE_SANITIZER STREQUAL "thread")
+    magpie_add_test_suite(magpie_mpmc_death_tests fast unit/mpmc_queue_death_test.cpp)
+    target_compile_definitions(magpie_mpmc_death_tests PRIVATE MAGPIE_ENABLE_TEST_HOOKS=1)
+    set_tests_properties(magpie_mpmc_death_tests PROPERTIES TIMEOUT 20)
+endif()
+
+if(MAGPIE_ENABLE_TEST_HOOKS)
+    add_executable(magpie_pool_mpmc_tests unit/pool_mpmc_test.cpp)
+    target_link_libraries(magpie_pool_mpmc_tests PRIVATE magpie_test_support GTest::gtest_main magpie_sanitizers)
+    target_compile_definitions(magpie_pool_mpmc_tests PRIVATE MAGPIE_ENABLE_TEST_HOOKS=1)
+    magpie_apply_project_defaults(magpie_pool_mpmc_tests)
+    add_test(NAME magpie_pool_mpmc_tests COMMAND magpie_pool_mpmc_tests)
+    set_tests_properties(magpie_pool_mpmc_tests PROPERTIES LABELS fast TIMEOUT 20)
+endif()
+
+add_executable(magpie_watchdog_probe support/watchdog_probe.cpp)
+target_link_libraries(magpie_watchdog_probe PRIVATE Threads::Threads magpie_sanitizers)
+magpie_apply_project_defaults(magpie_watchdog_probe)
+add_test(NAME magpie.watchdog-probe
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/support/check_watchdog.py"
+            $<TARGET_FILE:magpie_watchdog_probe>)
+set_tests_properties(magpie.watchdog-probe PROPERTIES LABELS fast TIMEOUT 10)
+
+if(MAGPIE_BUILD_BENCHMARKS)
+    add_test(NAME magpie.benchmark-queue-modes
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/bench/test_queue_modes.py"
+                $<TARGET_FILE:magpie_bench>)
+    set_tests_properties(magpie.benchmark-queue-modes PROPERTIES LABELS fast TIMEOUT 20)
 endif()
