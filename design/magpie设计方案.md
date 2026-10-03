@@ -334,7 +334,16 @@ enum class RejectionPolicy {
     DiscardOldest,   // 从全局队列头丢弃最旧任务后接收新任务
 };
 
-class QueueFullError : public std::runtime_error { /* ... */ };
+// P3-ae（G3 修复：错误可区分性）——满与关停的恢复动作相反，调用方必须能分支：
+enum class QueueFullReason { QueueFull, ShuttingDown };
+
+class QueueFullError : public std::runtime_error {
+public:
+    explicit QueueFullError(QueueFullReason r) : std::runtime_error(reason_text(r)), reason(r) {}
+    QueueFullReason reason;
+private:
+    static const char* reason_text(QueueFullReason);   // "queue full" / "pool is shutting down"
+};
 ```
 
 ### 6.2 ThreadPool 类
@@ -425,8 +434,8 @@ private:
 
 - `submit` / `submit_async` 线程安全，可从任意线程调用；提交本身仅做包装分配 + 一次 MPMC 入队，**无锁、不 wait**（P3-x 边界注：lock-free 为 try 语义——入队可因满返回、出队可因头部 reservation hole 判空，非"无卡点"；见 7.2.2 说明与 mpmc-queue-adr §3.2）。
 - **worker 线程内提交走快路径**：通过 `static thread_local WorkerCtx*` 标记（worker 线程入口设置）识别提交者身份，直接 push 本地 deque（先入本地，装满按 7.1.3 溢出）。此快路径对用户透明，不提供单独 API。**P3-u 修订**：push 后**无条件调用 `notify_one()`**（"本人正在执行任务故无需 notify"的原论证只覆盖非阻塞嵌套；废除后快路径与外部提交统一遵守 D2'，见 7.3.3/ADR-002 v2.4），随后 `drain_spill_overflow` 收口（notify 先于 drain 的顺序纪律见 8.4 骨架注释）。
-- **worker 内阻塞等待池内 future 是禁止项（P3-u，P0 级缺陷收口）**：任务代码内对提交进本池的 `std::future` 做任何阻塞等待（`.get()`/`wait()`/定时变体）构成结构性死锁——child 在其父 worker 的本地 deque 中，父线程阻塞后不会再 pop，若其他 worker 已入睡且无外部提交（或池仅 1 个 worker），child 永不被执行，pending 恒 > 0，`drain`/析构随之挂死。本禁令属**文档契约**：`std::future::get` 无法被池运行时拦截（无可断言点），违反的故障签名为"pending 停滞 + drain/join 挂死"。放行路径是未来实现 helping wait（等待期间代为取任务执行，ForkJoin/TBB 语义，随自定义池内 future 或 `wait_helping` API 立项，见 16.4 W3 候选）。
-- `submit_async` 与拒绝策略的交互：策略为 `Abort` 时抛 `QueueFullError`；为 `DiscardOldest` 时丢弃全局队列最旧任务后入队；为 `CallerRuns` 时**就地执行并在返回的 future 中就绪结果**（不进入队列；pending 按 8.2 净零计入，受提交门覆盖）。
+- **worker 内阻塞等待池内 future 是禁止项（P3-u，P0 级缺陷收口）**：任务代码内对提交进本池的 `std::future` 做任何阻塞等待（`.get()`/`wait()`/定时变体）构成结构性死锁——child 在其父 worker 的本地 deque 中，父线程阻塞后不会再 pop，若其他 worker 已入睡且无外部提交（或池仅 1 个 worker），child 永不被执行，pending 恒 > 0，`drain`/析构随之挂死。本禁令属**文档契约**：`std::future::get` 无法被池运行时拦截（无可断言点），违反的故障签名为"pending 停滞 + drain/join 挂死"。放行路径是 **W2.11 立项的 helping wait 语义草案（P3-ae，G2）**——等待期间代为取任务执行（ForkJoin/TBB 语义），随自定义池内 future 或 `wait_helping` API 落地（见 16.4）。
+- `submit_async` 与拒绝策略的交互：策略为 `Abort` 时抛 `QueueFullError(QueueFull)`；为 `DiscardOldest` 时丢弃全局队列最旧任务后入队；为 `CallerRuns` 时**就地执行并在返回的 future 中就绪结果**（不进入队列；pending 按 8.2 净零计入，受提交门覆盖）。**P3-ae（G3）**：`QueueFullReason` 区分两种不可混同的失败——`QueueFull`（可重试/背压）与 `ShuttingDown`（S0 拒绝，不可重试），调用方应按 `reason` 分支恢复。
 - 析构函数语义见 [9.4](#94-析构行为)。
 
 ### 6.5 初版不提供的 API（显式列出，避免误用）
@@ -857,7 +866,7 @@ void ThreadPool::submit_task(Task* t) {
     if (stopping_.load(std::memory_order_seq_cst)) {
         in_flight_submitters_.fetch_sub(1, std::memory_order_seq_cst);
         delete t;                                      // P3-ac：t 在手（头模板已分配），先回收再抛
-        throw QueueFullError("pool shut down");
+        throw QueueFullError(QueueFullReason::ShuttingDown);   // P3-ae（G3）：关停不可重试，与"满"区分
     }
     struct Gate {                                    // RAII：任何退出路径（含抛异常）都出闸
         std::atomic<std::uint32_t>& c;
@@ -894,7 +903,7 @@ void ThreadPool::submit_task(Task* t) {
             dec_pending();                                // 回退（P3-ad：1→0 必须通知，防 drain 丢唤醒——场景 #21）
             delete t;
             counters_.rejected.fetch_add(1, std::memory_order_relaxed);
-            throw QueueFullError("global queue full");
+            throw QueueFullError(QueueFullReason::QueueFull);   // P3-ae（G3）：队列满（可重试/背压）
         }
         if (rejection_ == RejectionPolicy::DiscardOldest) {
             Task* dropped = nullptr;
@@ -909,7 +918,7 @@ void ThreadPool::submit_task(Task* t) {
             dec_pending();
             delete t;
             counters_.rejected.fetch_add(1, std::memory_order_relaxed);
-            throw QueueFullError("global queue full");
+            throw QueueFullError(QueueFullReason::QueueFull);
         }
         break;                                                 // CallerRuns：不入队
     }
@@ -941,13 +950,13 @@ void ThreadPool::submit_task(Task* t) {
   1. 置 `stopping = true`（`seq_cst`）；
   2. **等待提交门关闭**：自旋等待 `in_flight_submitters_ == 0`（每次自旋加 `cpu_relax()`）。配合 S0 门（8.4，全 `seq_cst`），此步结束后**再无任何能够通过的提交**——所有"S0 检查在 stopping 置位之前"的提交都已完整入队（或按策略就地执行），之后到达的提交入闸后必读到 stopping==true 而被拒；
   3. `EventCount::notify_all()` 唤醒全部睡眠 worker。
-- 之后任何 `submit` / `submit_async` 一律抛 QueueFullError（S0 拒绝），不再走 RejectionPolicy——`CallerRuns` 会违反"shutdown 后再无新任务入口"的语义，`DiscardOldest` 同样是变相接收。
+- 之后任何 `submit` / `submit_async` 一律抛 `QueueFullError(QueueFullReason::ShuttingDown)`（P3-ae，G3：S0 拒绝），不再走 RejectionPolicy——`CallerRuns` 会违反"shutdown 后再无新任务入口"的语义，`DiscardOldest` 同样是变相接收。
 - 已入池任务的执行**不受影响**，照常跑完。
 - **关停期 worker 不睡眠**（5.3 规则）：第③步之后不再有新 notify 来源（新提交全部被 S0 拒绝、不触发唤醒），若 drain 阶段有 worker 重新睡入 futex，将无人唤醒它 → join 挂死。因此 `block_on_eventcount` 在 stopping 置位后直接返回，worker 以 spin/yield 忙等兜底跑完存量任务后退出——存量任务集合有限（门已关闭），必然终止。
 - 被 S0 拒绝的提交仍会短暂增减 `in_flight_submitters_`（增量→读 stopping→回退），其存在只让 worker 的退出判定**推迟一轮循环**，不影响正确性（见 9.2）。
 - **语义其一**：shutdown 的第②步会等待所有已过闸提交完成——包括 S4 的 CallerRuns 就地执行（该执行发生在提交门作用域内，属正确行为）。
 - **语义其二**：关停期 worker 忙等兜底跑完存量，存量有限必终止；长任务场景下 N 个 worker 全速忙等的 CPU 代价已识别。**P3-q 修订：给出立项触发判据与工作项（W2.8，见 16.4）**——当 `bench_shutdown_drain` 测得"shutdown 返回 → 全池退出"窗口内忙等 CPU·秒 > 单任务平均执行时长 × 存量任务数 × 50%（即纯浪费占比过半）时，立项"关停期 per-worker 独立 condvar 唤醒"；长任务负载纳入 bench_shutdown_drain 必测矩阵。触发前维持现状（spin/yield 忙等），不做预防性实现。
-- **语义其三（P2-8）**：stopping 置位后，池内任务（worker 线程）再调用 submit/submit_async 在 S0 被拒并抛 QueueFullError；递归 fork/join 负载的父任务须自行处理该异常——这是既定语义，由测试 BurstAcrossShutdown 覆盖。
+- **语义其三（P2-8）**：stopping 置位后，池内任务（worker 线程）再调用 submit/submit_async 在 S0 被拒并抛 `QueueFullError(ShuttingDown)`（P3-ae 口径）；递归 fork/join 负载的父任务须自行处理该异常——这是既定语义，由测试 BurstAcrossShutdown 覆盖。
 
 ### 9.2 worker 退出条件
 
@@ -1095,7 +1104,8 @@ tests/
 └── pool_test.cpp（集成）
     ├── SubmitAndDrain               # 千任务并发，drain 后 completed==submitted
     ├── FutureException              # submit_async 异常经 future 重抛
-    ├── RejectionPolicies            # Abort/DiscardOldest/CallerRuns 三策略语义 + 计数
+    ├── RejectionPolicies            # Abort/DiscardOldest/CallerRuns 三策略语义 + 计数；
+    │                                #   P3-ae（G3）：断言 QueueFullReason 分支（满=QueueFull、关停=ShuttingDown）
     ├── ShutdownGateRace             # 场景 #9：过闸被抢占 vs shutdown（专项压测）
     ├── ShutdownRace                 # 场景 #10：shutdown 窗口期持续提交
     ├── DiscardUnderLoad             # 场景 #6：DiscardOldest 与 worker 出队并发
@@ -1140,11 +1150,11 @@ tests/
 | 策略 | 行为 | 适用场景 |
 |---|---|---|
 | CallerRuns | 提交线程就地执行任务 | 默认；CPU 密集、天然背压 |
-| Abort | 抛 `QueueFullError` | 服务端：由上层框架/熔断兜底 |
-| DiscardOldest | 丢弃全局队列最老任务；重试耗尽（DISCARD_RETRY_LIMIT）或腾位失败并入 Abort 兜底抛 QueueFullError（8.4，P2-4） | 监控/日志类、可接受丢 tail 的损耗型任务 |
+| Abort | 抛 `QueueFullError(QueueFullReason::QueueFull)`（P3-ae，G3） | 服务端：由上层框架/熔断兜底 |
+| DiscardOldest | 丢弃全局队列最旧任务；重试耗尽（DISCARD_RETRY_LIMIT）或腾位失败并入 Abort 兜底抛 `QueueFullError(QueueFull)`（8.4，P2-4） | 监控/日志类、可接受丢 tail 的损耗型任务 |
 
 - 触发的唯一条件是**全局队列满**；本地 deque 满走溢出转移，永远不会触发拒绝（7.1.3）。
-- `DiscardOldest` 必须递增 `stats().discarded` 并在日志级别可观测，否则静默丢任务不可接受；重试耗尽或腾位失败时并入 Abort 兜底抛 `QueueFullError`（8.4，P2-4），选择该策略的用户须知晓这一异常路径。
+- `DiscardOldest` 必须递增 `stats().discarded` 并在日志级别可观测，否则静默丢任务不可接受；重试耗尽或腾位失败时并入 Abort 兜底抛 `QueueFullError(QueueFull)`（8.4，P2-4），选择该策略的用户须知晓这一异常路径。
 
 ### 11.2 背压链路
 
@@ -1280,7 +1290,7 @@ magpie/
 │                                  # -Wall -Wextra -Werror；选项 ENABLE_TSAN/ENABLE_ASAN/ENABLE_UBSAN（门禁用构建）
 ├── include/magpie/
 │   ├── config.h                   # 16.2 常量基线（唯一来源）
-│   ├── task.h                     # Task / TaskImpl<F> / QueueFullError
+│   ├── task.h                     # Task / TaskImpl<F> / QueueFullError(+QueueFullReason，P3-ae)
 │   ├── options.h                  # ThreadPoolOptions / RejectionPolicy
 │   ├── thread_pool.h              # ThreadPool / Stats（公开表面 + 薄模板 submit/submit_async 定义，P3-ac）
 │   ├── chase_lev_deque.h          # header-only（热路径内联，7.1）
@@ -1305,6 +1315,7 @@ magpie/
     3. **`std::atomic::wait/notify`**：睡眠端已有更底层的 futex 直调（§7.3.4），generic 兜底版用 mutex+condvar 且是 TSan 可检测背书（ADR-002 §6.3），没有理由引入第三种睡眠原语。
 - 无锁原语（deque / MPMC / EventCount）**header-only**：模板 + 热路径内联，常驻 L1 而不跨编译单元；
 - 池主体（`thread_pool.cpp`）单独编译单元；**公开模板采用薄模板拆法（P3-ac）**：`thread_pool.h` 内的 `submit<F>` / `submit_async<F>` 只做"构造 `TaskImpl<std::decay_t<F>>`（submit_async 另含 packaged_task 构造与 future 抽取，6.2）+ 移交私有非模板 `submit_task(Task*)`"两步；S0–S4 全部池化逻辑在 .cpp 的非模板成员内实现。任意用户 lambda 均在头内实例化，池化逻辑零头文件膨胀。**旧条文"声明在头、实例化点显式化"不可实现（P3-ac 证伪）**：lambda 类型无名且不可枚举，显式实例化仓库无法覆盖公开 API——不得按旧条文实现；顺序差异（分配先于提交门，停检失败路径先 delete 后抛）已在 §8.4 骨架注明；
+- **发布与 ABI 条款（P3-ae，G1 合规缺口修复）**：① 编译期符号策略：`thread_pool.cpp` 与 event_count 实现以 `-fvisibility=hidden` 构建，公开符号（`ThreadPool`/`Stats`/`ThreadPoolOptions`/`QueueFullError` 及其成员）经 `MAGPIE_API` 宏导出；模板与 header-only 原语（deque/MPMC/config）无需导出宏。② **ABI 不承诺**：库不承诺跨版本 ABI/符号兼容（每次发布允许 breaking；若未来需要并行安装多版本，采用 versioned inline namespace——在本承诺被推翻前不引入）。写入 README 与仓库发布说明，属 W1 交付物；LICENSE（MIT/Apache-2.0 二选一）同属 W1，见 §18。
 - 测试框架：单元/集成用 **GTest**（P3-q 修订：原"二选一待立项"落定为 GTest，决策与理由见 test-plan.md §2）；benchmark 用 google/benchmark 或自研计时循环，**必须输出** p50/p99/p999 与内置指标；
 - **编译器支持矩阵（P3-q 修订）**：GCC ≥ 11 / Clang ≥ 14（concepts 完整 + sanitizer 行为稳定为下限，不复古）；CI 至少覆盖"GCC 最新 + Clang 最新 + 各自上一大版本"三组，sanitizer 变体固定同一组工具链，禁止跨版本混采数据（与 benchmark-plan §2 环境纪律同构）；
 - CI 三个构建变体：release（-O2）、TSan、ASan+UBSan；10.4 矩阵分别落在对应变体上。
@@ -1402,7 +1413,8 @@ inline constexpr int DISCARD_RETRY_LIMIT = 2;   // DiscardOldest 腾位重试上
 | W2.8 | 关停期独立 condvar 唤醒（P3-q，见 9.1 语义其二） | 2 | 2 | bench_shutdown_drain 触发判据 | 关停窗口忙等 CPU·秒降 50%+ 且 DrainDuringShutdown 全绿 |
 | W2.9 | 布局对照实验：每槽一行 vs 紧凑布局（P3-q，见 7.1.1） | 2 | 2 | W2.3+W2.2 | bench_fine_grain/bench_empty_task 缓存 miss 数据五问报告，裁定 deque 与全局队列各自布局 |
 | W2.10 | 快路径轻量通知变体论证（P3-u，见 7.3.3/ADR-002 v2.4） | 2 | 2 | bench_burst 的 epoch_ 行争用与唤醒数据 | 五问报告 + ADR-002 §3.3 二择重证；"空→非空才 notify / 仅 waiters_>0 才 wake"任一变体落地前必须证明场景 #19 仍闭合，禁止先改后证 |
-| W3.x | 第三阶段候选（每项独立 ADR 立项；候选含内存池、全局队列分片、helping wait（阻塞式 fork/join 放行与 6.4 禁令解除的唯一路径，随自定义池内 future 或 wait_helping API 设计）、**快照屏障 API（P3-v：drain 改 quiescence 后，批量管道需要 invocation snapshot barrier——提交 ticket（先于入队赋值）+ 完成水位的新接口与证明；前置条件：修正 §13 推导口径的 CallerRuns 双计数）**） | 3 | 3 | W2.7 | 不做默认排期 |
+| W2.11 | **helping wait 语义草案 ADR（P3-ae，G2 立项）**：产出"池内 future / wait_helping"的语义与接入草案——等待者代为取任务的消耗协议（与三级退避、快路径身份检测、N=1 池语义、drain 互动的交互），为解除 6.4 禁令的引擎接口定义，阶段三实现 | 3 | 3 | W2.4+W2.6 | 草案 ADR 通过评审（架空实现，只定语义与证明义务）；明确 std::future 与池内 future 的关系 |
+| W3.x | 第三阶段候选（每项独立 ADR 立项；候选含内存池、全局队列分片、helping wait 实现（其语义草案前置 W2.11，勿架空）、**快照屏障 API（P3-v：drain 改 quiescence 后，批量管道需要 invocation snapshot barrier——提交 ticket（先于入队赋值）+ 完成水位的新接口与证明；前置条件：修正 §13 推导口径的 CallerRuns 双计数）**） | 3 | 3 | W2.7 | 不做默认排期 |
 
 - 规则：**前置未过门禁，不开展下一项**；P1 项全部完成后才允许动 P2（绑核调优等）；难度 3 的项（ChaseLevDeque、ADR 放宽）是正确性高风险区，必须被 10.4 对应的专项测试包住。
 
@@ -1418,12 +1430,14 @@ inline constexpr int DISCARD_RETRY_LIMIT = 2;   // DiscardOldest 腾位重试上
 
 在本文档之后，下列文档**已落地**（状态与本文档 §10.3 场景表绑定，随实现推进回填）：
 
-1. [chase-lev-deque-adr.md](chase-lev-deque-adr.md) —— 已接受（设计期接受，数据待实现回填）：批量窃取协议证明（§4 声称 1/2/3）、内存序放宽目标形态与门禁（§5）、溢出转移细节（§6）
+1. [chase-lev-deque-adr.md](chase-lev-deque-adr.md) —— **修订中（v1.9，P3-ad 批次后待复核）**：核心 steal 锁存协议与 §4.4 论证成立；overflow 暂存与再发布生命周期（§4.6）待 SpillOverflowReentrancy 变体实测背书后恢复"已接受"；其余：批量窃取协议证明（§4）、内存序放宽门禁（§5）、溢出转移细节（§6）
 2. [event-count-adr.md](event-count-adr.md) —— 已接受（设计期接受，数据待实现回填）：epoch 协议证明与前提 D1–D3（§3）、共享 vs 每 worker waker 裁决与切换判据（§5）、futex 移植层约束（§6）
 3. [mpmc-queue-adr.md](mpmc-queue-adr.md) —— 已接受（设计期接受，数据待实现回填）：**检查先行 + CAS 抢占**协议纪律与反例（§3.0，本文档 §7.2.2 骨架已同步修正）、满空判定证明（§3.2）、bulk 协议裁决与 limit 标定（§4）
 4. [benchmark-plan.md](benchmark-plan.md) —— 生效中（设计期接受，数据待实现回填）：负载矩阵落地程序清单（§3）、五问记录模板（§4）、常量标定实验（§5）、环境纪律（§2）
 5. [test-plan.md](test-plan.md) —— 已接受：测试框架选型 GTest（§2）、T1/T2/T3 分层与 CI（§3）、差分 oracle 规格（§4）、活性 watchdog（§5）、双实现同测（§7）、sanitizer/ARM64 映射（§8）——落地 §10.4 矩阵的执行层细则
 
 尚待按需立项的后续文档：`mpmc-queue-adr.md §4` 的 CAS 段批量协议立项、`event-count-adr.md §5` 的每 worker waker 立项（均以 benchmark 判据触发）。
+
+**P3-ae（G1）交付物补充**：仓库分发三件套缺口补齐——`LICENSE`（MIT / Apache-2.0 二选一，仓库创建时裁决）与 README 的 ABI 不承诺声明为 **W1 交付物**；helping wait 语义草案为 W2.11 交付物（见 16.4）。设计阶段文档（本目录）不附带 LICENSE 文本，只在此登记条款。
 
 本文档为以上全部文档的上位约束；若某 ADR 与本文档冲突，先回本文档裁决。
