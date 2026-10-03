@@ -1,0 +1,6 @@
+[
+  "git",
+  "describe",
+  "--tags",
+  "--exact-match"
+]

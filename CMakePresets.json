@@ -1,0 +1,50 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "release",
+      "displayName": "Release",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "MAGPIE_SANITIZER": "none",
+        "BUILD_TESTING": "ON"
+      }
+    },
+    {
+      "name": "tsan",
+      "displayName": "ThreadSanitizer",
+      "binaryDir": "${sourceDir}/build/tsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "MAGPIE_SANITIZER": "thread",
+        "BUILD_TESTING": "ON"
+      }
+    },
+    {
+      "name": "asan-ubsan",
+      "displayName": "AddressSanitizer + UndefinedBehaviorSanitizer",
+      "binaryDir": "${sourceDir}/build/asan-ubsan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "MAGPIE_SANITIZER": "address-undefined",
+        "BUILD_TESTING": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "release", "configurePreset": "release", "configuration": "Release" },
+    { "name": "tsan", "configurePreset": "tsan", "configuration": "RelWithDebInfo" },
+    { "name": "asan-ubsan", "configurePreset": "asan-ubsan", "configuration": "RelWithDebInfo" }
+  ],
+  "testPresets": [
+    { "name": "release-fast", "configurePreset": "release", "configuration": "Release", "filter": { "include": { "label": "fast" } }, "output": { "outputOnFailure": true } },
+    { "name": "tsan-fast", "configurePreset": "tsan", "configuration": "RelWithDebInfo", "filter": { "include": { "label": "fast" } }, "output": { "outputOnFailure": true } },
+    { "name": "asan-ubsan-fast", "configurePreset": "asan-ubsan", "configuration": "RelWithDebInfo", "filter": { "include": { "label": "fast" } }, "output": { "outputOnFailure": true } }
+  ]
+}

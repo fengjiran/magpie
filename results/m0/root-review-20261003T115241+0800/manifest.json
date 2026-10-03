@@ -1,0 +1,32 @@
+{
+  "captured_at": "20261003T115241+0800",
+  "base_commit": "dac83f800a813e1f97c2ffed45bd43fb124297d5",
+  "source_state": "uncommitted worktree; sha256 snapshot included",
+  "scope": "independent M0 Release/consumer checks; not ThreadPool, Linux futex, ARM64, or model-checker verification",
+  "result": "4/4 Release fast CTest and 1/1 independent shared-consumer CTest passed",
+  "source_sha256": {
+    "CMakeLists.txt": "86b46831594d8b866422297c2465ff21418596497a98d8af405f5b480b1866b9",
+    "CMakePresets.json": "34edee2fc16b75dadcffb150097343b348c0e199d316e19f7edb1f307a6969b9",
+    "cmake/MagpieOptions.cmake": "ae92f9ba0c67eb56e6b3e48493c7eeaa9c26fc38a3b24feff435ac07d59e7ba9",
+    "cmake/MagpieToolchain.cmake": "001ee1e4180406f234e53f6eedf9ecf7ca14916786edc4c59f2c7677af3d85ba",
+    "cmake/build_config.hpp.in": "28e24a8e4bc17f0cd59429bf84f4256b41d53f79360b2aa370be4d53f2a55150",
+    "include/magpie/export.hpp": "395bec3ba3f12d618ce2dfd37893cbae2ec515a3e0307954a8800ef2887c34c8",
+    "include/magpie/build_info.hpp": "8535315a4873fe182c8c5f34a3f2e9a4e8936871a5949a1ca0f9647aae1128b2",
+    "src/build_info.cpp": "a142a2b5bfaf8f9dfaf3d6afd301e5b4bcd5f31ea7715421e4e6621b693444a1",
+    "tests/CMakeLists.txt": "70740a6f321c4cc9eb24b50283a0e9cbaa182d1a513e14f14b54ba90dab223ef",
+    "tests/consumer/main.cpp": "83a0ec97a77d2d2995a9576eaefe2700213f3dfc2d49803f62785681bf0c131b",
+    "tests/consumer-project/CMakeLists.txt": "e6c191d380cfe7809d3bfdcf9b54e3f95c35f8db79a73a07be841cc0118bbbf5",
+    "tests/consumer-project/main.cpp": "f26757dd11acc1c88affe873ef9449f31c5e2e5826ccddc1632ba031b13c13c1",
+    "tests/consumer-project/build_consumer.py": "63da680fa202740ca937c3b7ce29eee0bafe1c7fe9eee849b97eadea128923a3",
+    "tests/unit/test_build_info.cpp": "e15e8708677cdab474febf983314050b2a39262e2f4419557e92de2147e0fcf1",
+    "scripts/run_ctest.py": "b6c5aa6f26328f72abe1fe432b90f1ae7714b41af2d4fa0d5175f78f8a85c2b1"
+  },
+  "commands": [
+    "cmake -S . -B /private/tmp/magpie-m0-root-full -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+    "cmake --build /private/tmp/magpie-m0-root-full --parallel 2",
+    "python3 scripts/run_ctest.py --build-dir /private/tmp/magpie-m0-root-full --mode fast",
+    "cmake -S tests/consumer-project -B /private/tmp/magpie-m0-root-consumer-shared -DMAGPIE_SOURCE_DIR=/Users/richard/Desktop/magpie -DMAGPIE_BUILD_SHARED=ON -DMAGPIE_EXPECT_SHARED=ON -DCMAKE_BUILD_TYPE=Release",
+    "cmake --build /private/tmp/magpie-m0-root-consumer-shared --parallel 2",
+    "ctest --test-dir /private/tmp/magpie-m0-root-consumer-shared --output-on-failure"
+  ]
+}

@@ -1,0 +1,119 @@
+Start testing: Oct 03 11:53 CST
+----------------------------------------------------------
+1/4 Testing: magpie.consumer-smoke
+1/4 Test: magpie.consumer-smoke
+Command: "/Users/richard/Desktop/magpie/build/asan-ubsan/tests/magpie_consumer_smoke"
+Directory: /Users/richard/Desktop/magpie/build/asan-ubsan/tests
+"magpie.consumer-smoke" start time: Oct 03 11:53 CST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.44 sec
+----------------------------------------------------------
+Test Passed.
+"magpie.consumer-smoke" end time: Oct 03 11:53 CST
+"magpie.consumer-smoke" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/4 Testing: magpie.consumer-project.static
+2/4 Test: magpie.consumer-project.static
+Command: "/opt/anaconda3/bin/python3.8" "/Users/richard/Desktop/magpie/tests/consumer-project/build_consumer.py" "--consumer-source" "/Users/richard/Desktop/magpie/tests/consumer-project" "--magpie-source" "/Users/richard/Desktop/magpie" "--binary-dir" "/Users/richard/Desktop/magpie/build/asan-ubsan/consumer-project-static" "--generator" "Unix Makefiles" "--compiler" "/Library/Developer/CommandLineTools/usr/bin/c++" "--configuration" "RelWithDebInfo" "--sanitizer" "address-undefined" "--cache-line" "64" "--shared" "OFF"
+Directory: /Users/richard/Desktop/magpie/build/asan-ubsan/tests
+"magpie.consumer-project.static" start time: Oct 03 11:53 CST
+Output:
+----------------------------------------------------------
+$ cmake -S /Users/richard/Desktop/magpie/tests/consumer-project -B /Users/richard/Desktop/magpie/build/asan-ubsan/consumer-project-static -G Unix Makefiles -DMAGPIE_SOURCE_DIR=/Users/richard/Desktop/magpie -DCMAKE_CXX_COMPILER=/Library/Developer/CommandLineTools/usr/bin/c++ -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMAGPIE_SANITIZER=address-undefined -DMAGPIE_CACHE_LINE=64 -DMAGPIE_BUILD_SHARED=OFF -DMAGPIE_EXPECT_SHARED=OFF -DBUILD_TESTING=OFF
+-- Configuring done (0.1s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/richard/Desktop/magpie/build/asan-ubsan/consumer-project-static
+$ cmake --build /Users/richard/Desktop/magpie/build/asan-ubsan/consumer-project-static --target magpie_external_consumer --parallel 2 --config RelWithDebInfo
+[ 25%] Building CXX object magpie-source/CMakeFiles/magpie.dir/src/build_info.cpp.o
+[ 50%] Linking CXX static library libmagpie.a
+[ 50%] Built target magpie
+[ 75%] Building CXX object CMakeFiles/magpie_external_consumer.dir/main.cpp.o
+[100%] Linking CXX executable magpie_external_consumer
+[100%] Built target magpie_external_consumer
+$ ctest --test-dir /Users/richard/Desktop/magpie/build/asan-ubsan/consumer-project-static --output-on-failure -C RelWithDebInfo
+Internal ctest changing into directory: /Users/richard/Desktop/magpie/build/asan-ubsan/consumer-project-static
+Test project /Users/richard/Desktop/magpie/build/asan-ubsan/consumer-project-static
+    Start 1: external-consumer-runs
+1/1 Test #1: external-consumer-runs ...........   Passed    0.53 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =   0.54 sec
+<end of output>
+Test time =   2.41 sec
+----------------------------------------------------------
+Test Passed.
+"magpie.consumer-project.static" end time: Oct 03 11:53 CST
+"magpie.consumer-project.static" time elapsed: 00:00:02
+----------------------------------------------------------
+
+3/4 Testing: magpie.consumer-project.shared
+3/4 Test: magpie.consumer-project.shared
+Command: "/opt/anaconda3/bin/python3.8" "/Users/richard/Desktop/magpie/tests/consumer-project/build_consumer.py" "--consumer-source" "/Users/richard/Desktop/magpie/tests/consumer-project" "--magpie-source" "/Users/richard/Desktop/magpie" "--binary-dir" "/Users/richard/Desktop/magpie/build/asan-ubsan/consumer-project-shared" "--generator" "Unix Makefiles" "--compiler" "/Library/Developer/CommandLineTools/usr/bin/c++" "--configuration" "RelWithDebInfo" "--sanitizer" "address-undefined" "--cache-line" "64" "--shared" "ON"
+Directory: /Users/richard/Desktop/magpie/build/asan-ubsan/tests
+"magpie.consumer-project.shared" start time: Oct 03 11:53 CST
+Output:
+----------------------------------------------------------
+$ cmake -S /Users/richard/Desktop/magpie/tests/consumer-project -B /Users/richard/Desktop/magpie/build/asan-ubsan/consumer-project-shared -G Unix Makefiles -DMAGPIE_SOURCE_DIR=/Users/richard/Desktop/magpie -DCMAKE_CXX_COMPILER=/Library/Developer/CommandLineTools/usr/bin/c++ -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMAGPIE_SANITIZER=address-undefined -DMAGPIE_CACHE_LINE=64 -DMAGPIE_BUILD_SHARED=ON -DMAGPIE_EXPECT_SHARED=ON -DBUILD_TESTING=OFF
+-- Configuring done (0.1s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/richard/Desktop/magpie/build/asan-ubsan/consumer-project-shared
+$ cmake --build /Users/richard/Desktop/magpie/build/asan-ubsan/consumer-project-shared --target magpie_external_consumer --parallel 2 --config RelWithDebInfo
+[ 25%] Building CXX object magpie-source/CMakeFiles/magpie.dir/src/build_info.cpp.o
+[ 50%] Linking CXX shared library libmagpie.dylib
+[ 50%] Built target magpie
+[ 75%] Building CXX object CMakeFiles/magpie_external_consumer.dir/main.cpp.o
+[100%] Linking CXX executable magpie_external_consumer
+[100%] Built target magpie_external_consumer
+$ ctest --test-dir /Users/richard/Desktop/magpie/build/asan-ubsan/consumer-project-shared --output-on-failure -C RelWithDebInfo
+Internal ctest changing into directory: /Users/richard/Desktop/magpie/build/asan-ubsan/consumer-project-shared
+Test project /Users/richard/Desktop/magpie/build/asan-ubsan/consumer-project-shared
+    Start 1: external-consumer-runs
+1/1 Test #1: external-consumer-runs ...........   Passed    1.20 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =   1.21 sec
+<end of output>
+Test time =   3.10 sec
+----------------------------------------------------------
+Test Passed.
+"magpie.consumer-project.shared" end time: Oct 03 11:53 CST
+"magpie.consumer-project.shared" time elapsed: 00:00:03
+----------------------------------------------------------
+
+4/4 Testing: magpie.unit
+4/4 Test: magpie.unit
+Command: "/Users/richard/Desktop/magpie/build/asan-ubsan/tests/magpie_unit_tests"
+Directory: /Users/richard/Desktop/magpie/build/asan-ubsan/tests
+"magpie.unit" start time: Oct 03 11:53 CST
+Output:
+----------------------------------------------------------
+Running main() from /Users/richard/Desktop/googletest/googletest/src/gtest_main.cc
+[==========] Running 2 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 2 tests from BuildInfoTest
+[ RUN      ] BuildInfoTest.ReportsTheConfigurationUsedToBuildTheLibrary
+[       OK ] BuildInfoTest.ReportsTheConfigurationUsedToBuildTheLibrary (0 ms)
+[ RUN      ] BuildInfoTest.CachelineConfigurationIsPowerOfTwo
+[       OK ] BuildInfoTest.CachelineConfigurationIsPowerOfTwo (0 ms)
+[----------] 2 tests from BuildInfoTest (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 2 tests from 1 test suite ran. (0 ms total)
+[  PASSED  ] 2 tests.
+<end of output>
+Test time =   0.59 sec
+----------------------------------------------------------
+Test Passed.
+"magpie.unit" end time: Oct 03 11:53 CST
+"magpie.unit" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Oct 03 11:53 CST
+
+fast =   6.54 sec*proc
+

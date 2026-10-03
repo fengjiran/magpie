@@ -1,0 +1,12 @@
+GenMC v0.17.0 (LLVM 19.1.7)
+Copyright (C) 2024 MPI-SWS. All rights reserved.
+
+*** Compilation complete.
+*** Transformation complete.
+*** Estimation complete.
+Total executions estimate: 2 (+- 0)
+Time to completion estimate: 0.05s
+*** Verification complete.
+No errors were detected.
+Number of complete executions explored: 2
+Total wall-clock time: 0.27s

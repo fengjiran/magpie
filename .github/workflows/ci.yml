@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      extended_label:
+        description: Optional stress or soak CTest label
+        required: false
+        type: choice
+        options:
+          - fast
+          - stress
+          - soak
+        default: fast
+
+jobs:
+  linux:
+    name: Linux / ${{ matrix.preset }} / ${{ matrix.compiler }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - preset: release
+            compiler: g++
+          - preset: tsan
+            compiler: g++
+          - preset: asan-ubsan
+            compiler: g++
+          - preset: release
+            compiler: clang++
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Configure
+        run: cmake --preset "${{ matrix.preset }}" -DCMAKE_CXX_COMPILER="${{ matrix.compiler }}"
+      - name: Build
+        run: cmake --build --preset "${{ matrix.preset }}" --parallel 2
+      - name: Run fast tests
+        run: python3 scripts/run_ctest.py --build-dir "build/${{ matrix.preset }}" --mode fast
+
+  macos:
+    name: macOS / Release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Configure
+        run: cmake --preset release
+      - name: Build
+        run: cmake --build --preset release --parallel 2
+      - name: Run fast tests
+        run: python3 scripts/run_ctest.py --build-dir build/release --mode fast
+
+  extended-tests:
+    if: github.event_name == 'workflow_dispatch' && inputs.extended_label != 'fast'
+    name: Linux / ${{ inputs.extended_label }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Configure release
+        run: cmake --preset release
+      - name: Build
+        run: cmake --build --preset release --parallel 2
+      - name: Run selected test label
+        run: python3 scripts/run_ctest.py --build-dir build/release --mode "${{ inputs.extended_label }}"
