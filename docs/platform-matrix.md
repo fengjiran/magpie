@@ -5,7 +5,7 @@
 | 平台/架构 | 编译器边界 | 当前证据 | 尚未覆盖 |
 |---|---|---|---|
 | macOS x86_64 | AppleClang 14+；本机 AppleClang 17.0.0，CMake 3.29.2 | 工程与池的 Release、TSan、ASan+UBSan 本机回归已运行；M5 generic EventCount 及 RC11 边界见 M5 记录 | macOS 结果不验证 Linux `pthread_create` 属性或 Linux futex |
-| Linux x86_64 | GCC 11+、Clang 14+ | M1 的 `pthread_create`、stack attribute 与 affinity 源码已实现；GitHub Actions 配置了 GCC Release/ASan、Clang Release/TSan 及 futex/generic 候选；本地没有 Linux executor | 本轮尚无 Linux CI 结果；pthread ABI、stack/affinity fallback 和原生 syscall 尚待 Linux 执行 |
+| Linux x86_64 | GCC 11+、Clang 14+ | M1 的 `pthread_create`、stack attribute 与 affinity 源码已实现；M5 futex 原生门禁已在 Linux x86_64（WSL2）完成：GCC 14 Release/ASan、Clang 18 TSan 及 generic control 的 fast/stress 全过，真实 EAGAIN/EINTR/spurious 与 join 后注册归零已验证（2026-10-11，见 M5 记录）。GitHub Actions 配置尚无可核验的远端运行结果 | 远端 Linux CI 结果；WSL2 证据仅覆盖 M5 正确性门禁，不扩展到 M6 物理 Linux 性能验收 |
 | Linux ARM64 | GCC/Clang 的最低版本沿用 Linux 条目 | 无 ARM64 主机或云机资源 | 任何内存序放宽前的 ARM64 编译、运行和模型联合门禁 |
 | Windows | MSVC 19.34+ 检查与导出宏分支已提供 | 无本机或 Windows CI 证据 | 静态/共享 consumer、DLL 加载、MSVC warning 与 sanitizer 支持；当前不列为已验证平台 |
 
@@ -28,8 +28,8 @@ Linux benchmark 编译/运行、资源固定和物理机完整矩阵仍待执行
 | CMake/C++20 | CMake 3.21+；GCC 11+、Clang 14+、AppleClang 14+、MSVC 19.34+ 初始边界 | 本机 CMake 3.29.2 与 AppleClang 17.0.0 的 C++20 feature probe 通过；Linux 在 Actions 配置，未本地执行 |
 | GTest | release tag `v1.14.0`，测试依赖 | 本机找到 1.14.0 已安装 package，未触发 FetchContent；生产目标不链接 GTest |
 | GenMC | 固定 release `v0.17.0`，commit `29b03a66402c4453fc77901ef3be90bb55707cd4`；显式 RC11；本机构建使用 LLVM 19.1.7 | 正例无错误并穷举 2 个 complete executions；relaxed 负例找到目标断言安全错误，完整 trace 和 DOT graph 归档在本机 `results/model/genmc-20261003T041133.472502Z/`（不随仓库跟踪）。仅验证模型工具和 atomic/fence 输入能力，不覆盖任何项目协议或 C++20 全部语义 |
-| Linux futex | Linux 原生 worker backend 和 syscall 级交错 | M5 源码、测试与 CI 已提供；当前无可用 Linux 执行环境，原生门禁待验收 |
-| 性能机器 | 固定物理 Linux CPU/亲和性/配额 | 资源未安排；M6 前置 |
+| Linux futex | Linux 原生 worker backend 和 syscall 级交错 | M5 futex 正确性门禁已在 Linux x86_64（WSL2、GCC 14/Clang 18）完成，证据见 M5 milestone 与 `results/linux-m5-20261011/`；性能与 ARM64 属 M6 |
+| 性能机器 | 固定物理 Linux CPU/亲和性/配额 | 2026-10-11 用户裁定本机 WSL2（kernel 6.18.40.1-microsoft-standard-WSL2、20 vCPU）作为 M6 验收环境，理由与风险见 benchmark-plan §2；ARM64 与物理 Linux 复查未变 |
 
 GenMC probe 不接受仅靠非零退出或 `assert` 文本作为负例成功：正例需有非零 complete-execution 计数及 no-errors 完成标记；负例需有 Safety violation、指定断言表达式和源行号、非空 error graph。M3/M4/M5 项目协议已有有限 RC11 投影；EventCount 模型使用抽象 compare/park/wake，不执行 Linux syscall。工具版本及边界见 [`../tools/model/README.md`](../tools/model/README.md)。
 
@@ -39,4 +39,4 @@ M4 Chase-Lev/MPMC+CV候选在macOS x86_64完成本机验证；Linux GCC Release/
 
 M4含真实`atomic_thread_fence`，Linux TSan job改用Clang；GCC的[`-Wtsan`官方说明](https://gcc.gnu.org/onlinedocs/gcc-13.1.0/gcc/Warning-Options.html#index-Wtsan)将该特性列为不支持，并可能误报。本项目保留fence与`-Werror`，不关闭诊断；GCC正常Release/ASan继续进矩阵，GCC+TSan当前不列为已支持组合。Linux本机使用TSan preset时应明确选择`-DCMAKE_CXX_COMPILER=clang++`。Clang sanitizer通过也不能证明SC fence协议；RC11与平台回归仍独立。
 
-M5 当前以 macOS x86_64/generic 验证，Linux CI 配置了 futex 的 GCC Release/ASan、Clang Release/TSan 和 generic control。2026-10-04 用户确认暂无 Linux 主机/CI 结果，原生门禁明确保留待验收；本机性能只作开发归因。见 [M5 milestone](milestones/M5.md)。
+M5 已完成：macOS x86_64/generic 开发验证之外，2026-10-11 在 Linux x86_64（WSL2，真实 Linux 内核与 futex syscall）以 GCC Release/ASan、Clang Release/TSan 和 generic control 完成 fast/stress 验收；用户裁定 WSL2 可作为 M5 正确性门禁的 Linux 原生证据，该裁定不扩展到 M6 物理 Linux 性能验收。Linux CI 的 GitHub Actions 配置仍无可核验远端结果。见 [M5 milestone](milestones/M5.md)。

@@ -8,6 +8,11 @@
 #include <magpie/thread_pool.hpp>
 #include <thread>
 
+// 标定形态下测试 target 由 CMake 传入映射宏；未传入时使用主设计 §16.2 默认。
+#if !defined(MAGPIE_BULK_LIMIT)
+#define MAGPIE_BULK_LIMIT 32
+#endif
+
 namespace {
 using P = magpie::detail::PoolTestHookPoint;
 struct State {
@@ -270,6 +275,10 @@ TEST(PoolEventCount, StolenBatchKeepsExecutionClaimDuringShutdown) {
 }
 
 TEST(PoolEventCount, BatchRemainderWakesParkedWorker) {
+    // Fixture 依赖一次全局 bulk 领取至少 16 个票据（index==17 为最后一项）；
+    // BULK_LIMIT<16 的标定形态下该前提不成立，由默认形态守护本语义。
+    if (MAGPIE_BULK_LIMIT < 16)
+        GTEST_SKIP();
     struct Transfer {
         std::latch last_claimed{1}, allow_last{1}, waiter_seen{1};
         std::atomic<bool> collecting{false}, parked_recorded{false};

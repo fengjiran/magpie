@@ -1,4 +1,5 @@
 #include "../support/watchdog.hpp"
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdio>
@@ -10,6 +11,11 @@
 #include <memory>
 #include <thread>
 #include <vector>
+
+// 标定形态下测试 target 由 CMake 传入映射宏；未传入时使用主设计 §16.2 默认。
+#if !defined(MAGPIE_BULK_LIMIT)
+#define MAGPIE_BULK_LIMIT 32
+#endif
 
 namespace {
 using Point = magpie::detail::PoolTestHookPoint;
@@ -133,7 +139,9 @@ TEST(WorkStealing, BulkReceiveCapacityBound) {
     pool.drain();
     pool.shutdown();
     EXPECT_EQ(done.load(), 16U);
-    EXPECT_EQ(state.largest_batch.load(), 16U);
+    // 批接收量按本地容量钳制：上限为 min(BULK_LIMIT, local_capacity)。
+    EXPECT_EQ(state.largest_batch.load(),
+              std::min<unsigned>(MAGPIE_BULK_LIMIT, 16U));
 }
 TEST(WorkStealing, LocalFullForwardsOnlyIncomingTask) {
     if (!MAGPIE_ENABLE_WORK_STEALING)

@@ -783,13 +783,21 @@ Stats 完整定义见 §6.2，计数字段 uint64_t、wake_threads optional<uint
 | 指标 | 基准 | 初值 |
 |---|---|---|
 | 单 worker 空任务吞吐 | bench_empty_task，无 CallerRuns，固定 producer 配置 | ≥1.0×10^6 worker completions/s |
-| Worker scaling | bench_worker_scaling，本地非阻塞产生工作，固定 driver，inline 单列 | T8/T1≥6.4，前提供给充足 |
+| Worker scaling | bench_worker_scaling，本地非阻塞产生工作，固定 driver，inline 单列 | T8/T1≥6.4，前提供给充足（WSL2 验收环境登记值 ≥2.0，见机器登记） |
 | Skew degradation | bench_skew，相同资源/任务工作量 | 吞吐损失≤20% |
 | p99 regression | bench_latency，同日重跑冻结基线 | ≤1.05×且无新峰 |
 | 空载 CPU | bench_idle_cpu，10s | ≤3%/worker |
-| 对比 speedup | bench_baselines，同资源/同任务数 | vs 显式 launch::async ≥2×；vs 每任务一线程 ≥10× |
+| 对比 speedup | bench_baselines，同资源/同任务数 | vs 显式 launch::async ≥2×；vs 每任务一线程 ≥10×（WSL2 验收环境登记值 ≥3.0×，见机器登记） |
 
 worker scaling 测量独立于多 producer 全局提交吞吐；不以增加 producer 或其 CallerRuns 完成数制造 worker 扩展性。W2.6 记录是否因供给不足无法判断，不能把不可用数据当通过。硬件导致门槛调整需双侧数据与理由，不能无证声称目标已达到。
+
+**机器登记（2026-10-11）：** 六项门槛在固定环境 WSL2（Linux 6.18.40.1-microsoft-standard-WSL2、x86_64、20 vCPU、GCC 14.2/Clang 18）上验收——用户裁定该环境数据可作为 M6 证据。登记理由（真实 Linux 内核与 futex 语义真实、环境可复现、用户独占资源）与风险缓解（频率漂移记录与同日基线夹带、SMT/NUMA 不可控 → worker≤8 且 CPU 集合分离、虚拟化共驻噪声 → ≥5 独立进程与同环境 replay 校验）见 [benchmark-plan](benchmark-plan.md) §2。该登记不扩展到 ARM64 门禁；未来物理 Linux 复查仍比对同一门槛节数据。
+
+**同名门槛的环境修订（2026-10-11，用户批准）：** 两项初值在 WSL2 共享 vCPU 环境下不可达，按硬件导致调整通道登记环境特定值，均附双侧数据（M6 记录 `results/m6-20261011/`，本机归档）：
+
+- T8/T1：6.4 → **≥2.0**。实测默认点 2.245，五轴 24 标定点范围 2.03–2.58；单 worker 空任务 5.0M/s 亦证明供给路径本身充足，8 vCPU 为宿主分时共享、固定 driver 单点供给为环境性瓶颈；skew 与 p99 门槛用更严格的越界上界守卫（skew 损失−4.3%，p99 三饱和点与 mutex 基线比 0.65–1.00×）。
+- 每任务一线程：10× → **≥3.0×**。实测 3.76×（pool 113.4k vs thread 30.0k ops/s，bench_baselines cpu payload），线程创建/销毁约 33μs/任务已占大头，剩余比例被任务执行时间稀释；async 对比 3.80× 无需修订。
+- 原物理 Linux 初值保留为物理机复查基准。修订只改环境判定值，不改测量协议；未挑负载、未放宽资源预算。
 
 ### 14.2 五问
 
@@ -832,6 +840,8 @@ inline constexpr int DISCARD_RETRY_LIMIT = 2;
 ~~~
 
 没有 LOCAL_SPIN_US/tsc_now/overflow 常量。require_invariant 与 require_index_room 是 release 生效的 fail-fast；用户 Options 错误以异常报告。标定必须附吞吐/p99、环境和五问。
+
+M6 起 BULK_LIMIT/STEAL_CAP/SPIN_LIMIT/YIELD_LIMIT/VICTIM_TRIES 由 `src/thread_pool.cpp` 顶部宏兜底默认（数值即上表），benchmark 变体经 CMake `-DMAGPIE_*` 覆写且只允许 benchmark-plan §5 枚举白名单（cmake/MagpieOptions.cmake 校验）；M6 标定结论保持默认不变。
 
 ### 16.3 阶段
 

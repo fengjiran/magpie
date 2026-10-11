@@ -1,6 +1,6 @@
 # M5 EventCount 候选
 
-M5 使用 MPMC + Chase-Lev 调度、每 worker 独立 WaitSlot 和三级退避。默认配置仍为 mutex/global/CV；EventCount 是 opt-in。generic 在 macOS 验证，Linux futex 源码和原生测试已提供，原生验收仍待可用主机。状态与证据见 [M5 milestone](milestones/M5.md)。
+M5 使用 MPMC + Chase-Lev 调度、每 worker 独立 WaitSlot 和三级退避。默认配置仍为 mutex/global/CV；EventCount 是 opt-in。generic 在 macOS 验证；Linux futex 原生门禁已于 2026-10-11 在 Linux x86_64（WSL2）完成验收，M5 标记完成。状态与证据见 [M5 milestone](milestones/M5.md)。
 
 ```sh
 cmake --preset release-eventcount
@@ -43,4 +43,6 @@ generic 用每槽 mutex/cv 配对 predicate wait 与 CAS/notify；Linux 用四�
 
 在 Linux 上运行上述 release-eventcount（auto=futex），并运行独立 TSan/ASan+UBSan 配置。fast 自动包含同一原语的 generic/futex suite、真实 EAGAIN/EINTR/spurious 用例及池级关闭/迁移回归。另以独立 build 目录设置 `MAGPIE_EVENTCOUNT_BACKEND=generic` 运行 pool control；配置中保留 MPMC、work stealing 和 eventcount。
 
-归档源码 revision/dirty hash、编译器和 libc/内核/架构信息、CMakeCache、实际命令、退出码、CTest 日志；完成 fast/stress、部分构造失败与全部 join 后注册归零检查。CI 配置存在不算原生验收通过。ARM64、固定物理 Linux 性能与 M6 六项门槛仍分别记录。
+归档源码 revision/dirty hash、编译器和 libc/内核/架构信息、CMakeCache、实际命令、退出码、CTest 日志；完成 fast/stress、部分构造失败与全部 join 后注册归零检查。CI 配置存在不算原生验收通过。
+
+2026-10-11 该入口已在 Linux x86_64（WSL2，GCC 14/Clang 18）执行完毕：四配置 fast/stress 全过，归档 `results/linux-m5-20261011/`（本机）。ARM64、固定物理 Linux 性能与 M6 六项门槛仍分别记录。

@@ -111,6 +111,7 @@ target_include_directories(magpie
 )
 target_compile_definitions(magpie PRIVATE MAGPIE_BUILDING_LIBRARY
     MAGPIE_EVENTCOUNT_USE_FUTEX=${MAGPIE_EVENTCOUNT_USE_FUTEX})
+magpie_apply_calibration_defs(magpie)
 if(MAGPIE_PARKING_BACKEND STREQUAL "eventcount")
     target_compile_definitions(magpie PRIVATE MAGPIE_USE_EVENT_COUNT=1)
 endif()
@@ -149,6 +150,7 @@ if(MAGPIE_ENABLE_TEST_HOOKS)
         PRIVATE MAGPIE_BUILDING_LIBRARY MAGPIE_ENABLE_TEST_HOOKS=1
         PUBLIC MAGPIE_STATIC_DEFINE
     )
+    magpie_apply_calibration_defs(magpie_test_support)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_compile_definitions(magpie_test_support PRIVATE _GNU_SOURCE=1)
     endif()

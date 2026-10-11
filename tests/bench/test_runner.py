@@ -72,7 +72,7 @@ class RunnerTests(unittest.TestCase):
             bundle = baseline / "source.bundle"
             binary.write_bytes(b"mock binary")
             bundle.write_bytes(b"mock source")
-            runner.run_series(binary, config, baseline / "initial", 5, False, True)
+            runner.run_series(binary, config, baseline / "initial", 5, False, "physical")
             metadata = {"result": "frozen", "baseline_commit": "test-revision",
                         "binary_sha256": runner.sha256(binary),
                         "bundle_sha256": runner.sha256(bundle),
@@ -85,7 +85,7 @@ class RunnerTests(unittest.TestCase):
                 with self.subTest(smoke=smoke):
                     args = argparse.Namespace(baseline=baseline,
                         output=baseline / ("smoke" if smoke else "formal"),
-                        repeat=5, smoke=smoke, physical_linux_attested=True, profile=False)
+                        repeat=5, smoke=smoke, platform_attested="physical", profile=False)
                     runner.replay(args)
                     current = json.loads((args.output / "manifest.json").read_text())
                     comparison = json.loads((args.output / "comparison.json").read_text())
@@ -102,6 +102,47 @@ class RunnerTests(unittest.TestCase):
             runner.replay(args)
             comparison = json.loads((args.output / "comparison.json").read_text())
             self.assertFalse(comparison["formal_ab_eligible"])
+
+    def test_platform_attestation_wsl2_requires_virt_detection(self):
+        config = dict(runner.DEFAULTS, **{"worker-cpus": "0", "producer-cpus": "1"})
+
+        def execute(command, output=None, **kwargs):
+            identity = command[command.index("--config-id") + 1]
+            data = "config_hash\tsample_dropped\ttotal_ops_s\n%s\t0\t100\n" % identity
+            Path(str(output) + ".stdout.txt").write_text(data)
+            Path(str(output) + ".stderr.txt").write_text("")
+            return subprocess.CompletedProcess(command, 0, data, "")
+
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.object(runner.platform, "system", return_value="Linux"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            # 检测输出含 wsl → wsl2 声明可获正式资格。
+            with patch.object(runner, "environment", side_effect=lambda: {
+                    "captured_local": "2026-10-11T12:00:00+0800", "system": "Linux",
+                    "virtualization": {"command": ["systemd-detect-virt"], "exit_code": 0, "stdout": "wsl\n", "stderr": ""}}), \
+                    patch.object(runner, "execute", side_effect=execute):
+                output = Path(temp) / "wsl2-ok"
+                binary = Path(temp) / "mock-binary"
+                binary.write_bytes(b"mock binary")
+                runner.run_series(binary, config, output, 5, False, "wsl2")
+                manifest = json.loads((output / "manifest.json").read_text())
+                self.assertTrue(manifest["formal_platform_eligible"])
+                self.assertEqual(manifest["environment"]["platform_attested"], "wsl2")
+            # 检测不可用 → wsl2 声明被拒，防误标。
+            with patch.object(runner, "environment", side_effect=lambda: {
+                    "captured_local": "2026-10-11T12:00:00+0800", "system": "Linux",
+                    "virtualization": {"command": ["systemd-detect-virt"], "unavailable": "not installed"}}), \
+                    patch.object(runner, "execute", side_effect=execute):
+                with self.assertRaisesRegex(ValueError, "requires systemd-detect-virt"):
+                    runner.run_series(binary, config, Path(temp) / "wsl2-bad", 5, False, "wsl2")
+            # off → 永无正式资格。
+            with patch.object(runner, "environment", side_effect=lambda: {
+                    "captured_local": "2026-10-11T12:00:00+0800", "system": "Linux"}), \
+                    patch.object(runner, "execute", side_effect=execute):
+                output = Path(temp) / "off"
+                runner.run_series(binary, config, output, 5, False, "off")
+                manifest = json.loads((output / "manifest.json").read_text())
+                self.assertFalse(manifest["formal_platform_eligible"])
 
 
 if __name__ == "__main__":

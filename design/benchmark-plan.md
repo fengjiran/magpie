@@ -14,7 +14,7 @@
 
 | 项 | 要求 |
 |---|---|
-| 机器 | 固定物理Linux；WSL/macOS仅开发趋势，不能作为最终futex验收 |
+| 机器 | 固定物理 Linux；WSL/macOS 仅开发趋势，不能作为最终 futex 验收（2026-10-11 用户裁定 WSL2 固定环境升级为 M6 验收证据，见下） |
 | CPU | 记录CPU型号、核/SMT、允许CPU集合、容器quota、NUMA、频率策略 |
 | 绑核 | driver/producer和worker使用明确集合；比较版本使用同一集合 |
 | 资源 | 对比固定producer数及CPU预算；CallerRuns不能额外计入worker scaling |
@@ -23,6 +23,12 @@
 | 归因 | gate、pending、submitted、epoch、waiters、cursor、扫描槽、slot seq、alloc均采样 |
 
 最终物理机尚待安排；没有数据时不关闭主设计§14.1门禁。
+
+**2026-10-11 机器裁定（M6）：** 无物理 Linux 可安排，用户明确裁定：本机 WSL2（Linux 6.18.40.1-microsoft-standard-WSL2、x86_64、20 vCPU）的固定环境数据可作为 M6 六项门槛的验收证据，登记理由与风险如下，并同步 [platform-matrix](../docs/platform-matrix.md) 与主设计 §14.1：
+
+- 理由：真实 Linux 内核与原生 futex **核心正确性/性能语义真实**；环境可复现（内核版本、编译器、CPU 集合记录入 manifest）；用户是该环境所有者并核验资源不与其他测量共享。
+- 风险与缓解：宿主调度与频率漂移（测量前后记录 governor/频率、同日夹带基线重跑、median/IQR 判噪）；SMT/NUMA 拓扑不可控（worker≤8 且与 driver/producer 分离 CPU 集合，不宣称 NUMA 结论）；虚拟化开销随宿主共驻负载变化（重复≥5 独立进程并要求同环境 replay 校验）。
+- 范围：该裁定仅覆盖 M6 性能验收；ARM64 门禁（内存序放宽前置）与未来物理 Linux 复查不受影响。runner 以 `--platform-attested=wsl2` 登记并强制 `systemd-detect-virt` 检测一致，防误标。
 
 ## 3. 路径与程序
 
@@ -56,7 +62,7 @@ stats逐项快照可能不自洽；稳态差分须说明采样边界，精确总
 
 ## 5. 门槛与标定
 
-主设计§14.1六项为当前数值门槛：单worker≥10^6/s、独立worker scaling≥6.4、skew损失≤20%、p99≤同日基线1.05×、空载≤3%/worker、async≥2×/每任务线程≥10×。机器差异修订必须登记理由及双侧数据。
+主设计§14.1六项为当前数值门槛：单worker≥10^6/s、独立worker scaling≥6.4、skew损失≤20%、p99≤同日基线1.05×、空载≤3%/worker、async≥2×/每任务线程≥10×。机器差异修订必须登记理由及双侧数据。2026-10-11 WSL2 验收环境修订（用户批准，见主设计机器登记）：T8/T1≥2.0、每任务一线程≥3.0×；原物理 Linux 初值保留。
 
 BULK_LIMIT {1,4,16,32,64,128}、STEAL_CAP {1,4,16,32,64,128}、SPIN {0,16,64,256,1024}、YIELD {0,4,8,16}、主循环VICTIM_TRIES {1,2,4}。所有接收量钳制local_capacity，入睡前全victim扫描不删减。
 

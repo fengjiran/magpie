@@ -28,8 +28,33 @@
 #include <thread>
 #include <vector>
 
+// M6 标定参数，默认值与主设计 §16.2 一致；benchmark 变体经 CMake -D 覆写。
+// 协议约束（ADR-001/003）不随标定变化：接收量仍钳 local_capacity，
+// STEAL_CAP 是重复单项 steal 的次数上限，不是一次 CAS 的半批量。
+#if !defined(MAGPIE_BULK_LIMIT)
+#define MAGPIE_BULK_LIMIT 32
+#endif
+#if !defined(MAGPIE_STEAL_CAP)
+#define MAGPIE_STEAL_CAP 64
+#endif
+#if !defined(MAGPIE_SPIN_LIMIT)
+#define MAGPIE_SPIN_LIMIT 64
+#endif
+#if !defined(MAGPIE_YIELD_LIMIT)
+#define MAGPIE_YIELD_LIMIT 8
+#endif
+#if !defined(MAGPIE_VICTIM_TRIES)
+#define MAGPIE_VICTIM_TRIES 1
+#endif
+
 namespace magpie {
 namespace {
+
+#if defined(MAGPIE_USE_WORK_STEALING)
+// 批接收 buffer 必须同时容纳全局 bulk 与 steal 的最大标定值。
+constexpr std::size_t kBatchCap =
+    MAGPIE_BULK_LIMIT > MAGPIE_STEAL_CAP ? MAGPIE_BULK_LIMIT : MAGPIE_STEAL_CAP;
+#endif
 
 #if defined(MAGPIE_ENABLE_TEST_HOOKS)
 enum class HookPoint {
@@ -240,7 +265,7 @@ struct ThreadPool::Impl {
             this};
 #endif
         ChaseLevDeque local;
-        std::array<Task*, 64> batch{};
+        std::array<Task*, kBatchCap> batch{};
         std::vector<std::size_t> victims;
         std::uint64_t random_state;
         std::uint64_t random() noexcept {
@@ -704,7 +729,7 @@ struct ThreadPool::Impl {
     }
     Task* steal_from(WorkerCtx& context, std::size_t victim, bool& migrated) noexcept {
         MAGPIE_TEST_HOOK(BeforeVictimProbe, victim);
-        const auto limit = std::min(std::size_t{64}, local_capacity);
+        const auto limit = std::min<std::size_t>(MAGPIE_STEAL_CAP, local_capacity);
         std::size_t count = 0;
         while (count < limit) {
             auto* task = workers[victim]->local.steal();
@@ -721,7 +746,8 @@ struct ThreadPool::Impl {
             return task;
         }
         const auto count = global_queue.dequeue_bulk(context.batch.data(),
-                                                     std::min(std::size_t{32}, local_capacity));
+                                                     std::min<std::size_t>(MAGPIE_BULK_LIMIT,
+                                                                           local_capacity));
         if (count) {
             return transfer_batch(context, count, migrated);
         }
@@ -729,8 +755,17 @@ struct ThreadPool::Impl {
             return nullptr;
         }
         if (!full_scan) {
-            return steal_from(context, context.victims[context.random() % context.victims.size()],
-                              migrated);
+            // 非全扫描路径每轮从随机起点连续探测至多 MAGPIE_VICTIM_TRIES 个
+            // 不重复 victim，首个命中即返回；入睡前的全扫描仍遍历全部 victim。
+            const auto attempts = std::min<std::size_t>(MAGPIE_VICTIM_TRIES, context.victims.size());
+            const auto start = context.random() % context.victims.size();
+            for (std::size_t attempt = 0; attempt < attempts; ++attempt) {
+                const auto slot = (start + attempt) % context.victims.size();
+                if (auto* task = steal_from(context, context.victims[slot], migrated)) {
+                    return task;
+                }
+            }
+            return nullptr;
         }
         MAGPIE_TEST_HOOK(BeforeFullScan, context.index);
         // Fixed storage, shuffled permutation; the final scan probes every
@@ -758,11 +793,13 @@ struct ThreadPool::Impl {
                 increment_saturated(task ? post_wake_hit : post_wake_empty);
                 post_return = false;
             }
-            for (unsigned spin = 0; !task && spin < 64; ++spin) {
+            // 用 != 而非 < 写上限：spin 单调递增，两者等价；!= 兼容 SPIN_LIMIT=0
+            // 标定点且不触发 -Wtype-limits。
+            for (unsigned spin = 0; !task && spin != MAGPIE_SPIN_LIMIT; ++spin) {
                 detail::cpu_relax();
                 task = acquire_ready(context, false, migrated, false);
             }
-            for (unsigned retry = 0; !task && retry < 8; ++retry) {
+            for (unsigned retry = 0; !task && retry != MAGPIE_YIELD_LIMIT; ++retry) {
                 std::this_thread::yield();
                 task = acquire_ready(context, false, migrated, false);
             }

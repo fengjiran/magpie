@@ -136,7 +136,7 @@ def summarize(rows):
     return result
 
 
-def run_series(binary, config, output, repeat, smoke, physical=False, profile=False):
+def run_series(binary, config, output, repeat, smoke, platform_attested="off", profile=False):
     output.mkdir(parents=True, exist_ok=False)
     manifest = {"result": "running", "config": config, "config_hash": config_hash(config),
                 "binary": str(binary), "binary_sha256": sha256(binary), "repeat": repeat,
@@ -144,11 +144,21 @@ def run_series(binary, config, output, repeat, smoke, physical=False, profile=Fa
     protocol = repeat >= 5 and config["warmup"] >= 2 and config["duration"] >= 10
     if not smoke and not protocol:
         raise ValueError("measurement requires repeat >= 5, warmup >= 2 and duration >= 10; use --smoke for diagnostics")
-    if physical and (platform.system() != "Linux" or not config.get("worker-cpus") or not config.get("producer-cpus")):
-        raise ValueError("physical Linux runs require Linux and explicit worker/producer CPU sets")
-    manifest["environment"]["physical_linux"] = "operator-attested" if physical else "not-attested"
+    if platform_attested not in ("off", "physical", "wsl2"):
+        raise ValueError("platform-attested must be off, physical or wsl2")
+    if platform_attested != "off":
+        if platform.system() != "Linux" or not config.get("worker-cpus") or not config.get("producer-cpus"):
+            raise ValueError("platform-attested runs require Linux and explicit worker/producer CPU sets")
+        if platform_attested == "wsl2":
+            # 操作员声明须与机器虚拟化检测一致，防止把物理机/其他容器数据误标为 WSL2。
+            detected = manifest["environment"].get("virtualization")
+            stdout = (detected or {}).get("stdout", "").lower()
+            if "unavailable" in detected or "wsl" not in stdout:
+                raise ValueError("platform-attested=wsl2 requires systemd-detect-virt to report WSL; got: %r" % (detected,))
+    manifest["environment"]["platform_attested"] = platform_attested
     manifest["measurement_protocol_met"] = protocol
-    manifest["formal_platform_eligible"] = bool(physical and protocol and not smoke and not profile)
+    manifest["formal_platform_eligible"] = bool(platform_attested in ("physical", "wsl2")
+                                                and protocol and not smoke and not profile)
     manifest["timing_scope"] = "fixed window plus quiescent tail; shutdown uses finite inventory"
     manifest["attribution"] = "controlled queue/wrapping contrasts; no additive decomposition or isolated gate/epoch timing"
     manifest_path = output / "manifest.json"
@@ -174,7 +184,7 @@ def run_series(binary, config, output, repeat, smoke, physical=False, profile=Fa
             row = parsed[0]
             if row["sample_dropped"] != "0":
                 raise RuntimeError("latency sample storage exhausted; increase stride/capacity and rerun in a new directory")
-            if physical and r.stderr and (not profile or "magpie:" in r.stderr):
+            if platform_attested != "off" and r.stderr and (not profile or "magpie:" in r.stderr):
                 raise RuntimeError("formal run emitted warnings, including possible affinity fallback")
             if sha256(binary) != manifest["binary_sha256"]:
                 raise RuntimeError("benchmark binary changed during measurement")
@@ -273,7 +283,7 @@ def freeze(args, config):
                 raise RuntimeError("live source changed while freezing; snapshot not accepted")
             metadata["result"] = "frozen"
             manifest.write_text(json.dumps(metadata, indent=2))
-            run_series(binary, config, output / "initial", args.repeat, args.smoke, args.physical_linux_attested, args.profile)
+            run_series(binary, config, output / "initial", args.repeat, args.smoke, args.platform_attested, args.profile)
     except BaseException as error:
         metadata["result"] = "failed"
         metadata["error"] = str(error)
@@ -297,7 +307,7 @@ def replay(args):
     if config_hash(config) != metadata["config_hash"] or metadata["config_hash"] != initial["config_hash"]:
         raise ValueError("frozen configuration identity mismatch")
     rows = run_series(baseline / "magpie_bench", config, args.output.resolve(), args.repeat, args.smoke,
-                      args.physical_linux_attested, args.profile)
+                      args.platform_attested, args.profile)
     current = json.loads((args.output / "manifest.json").read_text())
     # Environment equivalence is a prerequisite for A/B, not a guarantee of noise-free results.
     keys = ("platform", "machine", "logical_cpu_count", "allowed_cpus", "cpu_quota", "cpu_topology", "frequency_policies", "frequency_policy")
@@ -370,7 +380,7 @@ def suite(args, base):
                 if name.startswith("shutdown-"):
                     config.update({"task-count": 32, "sleep-ms": .1})
             rows = run_series(args.binary.resolve(), config, args.output / name, args.repeat, args.smoke,
-                              args.physical_linux_attested, args.profile)
+                              args.platform_attested, args.profile)
             inventory["cases"].append({"name": name, "result": "passed", "config_hash": config_hash(config)})
             if name == "empty":
                 if "eventcount" in rows[0]["backend"]:
@@ -383,7 +393,7 @@ def suite(args, base):
             if args.smoke:
                 config.update({"warmup": .01, "duration": .03, "sample-stride": 4})
             run_series(args.binary.resolve(), config, args.output / name, args.repeat, args.smoke,
-                       args.physical_linux_attested, args.profile)
+                       args.platform_attested, args.profile)
             inventory["cases"].append({"name": name, "result": "passed", "config_hash": config_hash(config)})
         inventory["result"] = "passed"
     except BaseException as error:
@@ -403,7 +413,8 @@ def main():
     parser.add_argument("--config", type=Path)
     parser.add_argument("--repeat", type=int, default=5)
     parser.add_argument("--smoke", action="store_true", help="short diagnostics; never performance evidence")
-    parser.add_argument("--physical-linux-attested", action="store_true", help="operator attests fixed physical Linux and controlled CPU sets")
+    parser.add_argument("--platform-attested", choices=("off", "physical", "wsl2"), default="off",
+                        help="operator attests a fixed Linux platform (physical or wsl2) and controlled CPU sets")
     parser.add_argument("--profile", action="store_true", help="perf stat diagnostics, separate from unprofiled comparisons")
     parser.add_argument("--compiler")
     args = parser.parse_args()
@@ -423,7 +434,7 @@ def main():
         suite(args, config)
     else:
         run_series(args.binary.resolve(), config, args.output.resolve(), args.repeat, args.smoke,
-                   args.physical_linux_attested, args.profile)
+                   args.platform_attested, args.profile)
 
 
 if __name__ == "__main__":
