@@ -1,7 +1,7 @@
 # magpie 实施步骤与里程碑
 
 - 日期：2026-10-03。
-- 状态：**M0 待 Linux CI；M1 mutex 底座已通过本机验证、待平台/测试收口；M2 工程与本机开发冻结/同日重跑已完成、待物理 Linux 完整验收；M3/M4 候选及本机验证已完成、正式门禁待关闭；M5 EventCount 已通过 macOS generic 回归与 Linux（WSL2）原生 futex 门禁并标记完成，证据见 M5 记录；M6 已标记完成（WSL2 验收、两项门槛环境修订，见 [M6 milestone](../docs/milestones/M6.md)）；M7 未开始**。
+- 状态：**M0 待 Linux CI；M1 mutex 底座已通过本机验证、待平台/测试收口；M2 工程与本机开发冻结/同日重跑已完成、待物理 Linux 完整验收；M3/M4 候选及本机验证已完成、正式门禁待关闭；M5 EventCount 已通过 macOS generic 回归与 Linux（WSL2）原生 futex 门禁并标记完成，证据见 M5 记录；M6 已标记完成但 T8/T1 环境修订已于 2026-10-12 撤销（归因待重做）并新增 gate 7（多 worker 亚微秒扩展，未关闭），详见 [M6 milestone](../docs/milestones/M6.md)；M7 未开始**。
 - 范围：实施当前审核修订版线程池，形成正确性证据、冻结基线和首版交付。M1 尚无 Linux pthread backend 原生验收；完整证据见 [M1 milestone](../docs/milestones/M1.md)。
 - 上位约束：[主设计](magpie设计方案.md)、[逐项修复对照](review-fixes-2026-10-03.md)、[测试计划](test-plan.md)、[benchmark 计划](benchmark-plan.md)。
 
@@ -194,7 +194,7 @@ flowchart LR
 
 ## 9. M6：性能标定与正式验收
 
-当前状态（2026-10-11 完成）：五轴 24 点 × 7 负载标定矩阵在 WSL2（用户裁定为 M6 验收环境）完成，结论为生产默认不变；六项门槛在冻结 mutex 同日 A/B 下判定——空任务/skew/p99/空载/async 按原始初值通过，T8/T1 与每任务一线程两项按用户批准的环境修订通道在 WSL2 登记特定值（≥2.0、≥3.0×）后通过，原初值保留为物理机复查基准。参数宏接入、回归、修订理由与未覆盖项见 [M6 milestone](../docs/milestones/M6.md)。
+当前状态（2026-10-11 完成验收，2026-10-12 部分重开）：五轴 24 点 × 7 负载标定矩阵在 WSL2（用户裁定为 M6 验收环境）完成，结论为生产默认不变；六项门槛在冻结 mutex 同日 A/B 下判定。2026-10-12 经核实撤销 T8/T1 WSL2 登记值（归因待重做）并新增 gate 7（多 worker 亚微秒扩展与 CPU 放大，未关闭）；每任务一线程环境修订（≥3.0×）保持。定位结论与后续见 [M6 milestone](../docs/milestones/M6.md)。
 
 实施步骤：
 

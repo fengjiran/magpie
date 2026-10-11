@@ -1,3 +1,4 @@
+#include "magpie/build_config.hpp"
 #include "magpie/thread_pool.hpp"
 
 #include "worker_thread.hpp"
@@ -38,7 +39,10 @@
 #define MAGPIE_STEAL_CAP 64
 #endif
 #if !defined(MAGPIE_SPIN_LIMIT)
-#define MAGPIE_SPIN_LIMIT 64
+// 短突发场景 64 次 relax（几十 ns）过短：空闲 worker 反复进入
+// 注册→全扫描→futex→唤醒→再扫描的昂贵循环（1.3 复现 95% 空返）。
+// 1024 由 M6 标定 SPIN 轴与短突发复现共同支撑（p99/空载无劣化）。
+#define MAGPIE_SPIN_LIMIT 1024
 #endif
 #if !defined(MAGPIE_YIELD_LIMIT)
 #define MAGPIE_YIELD_LIMIT 8
@@ -180,13 +184,10 @@ void require_external_control(const ThreadPool* pool) {
     return hardware_hint == 0 ? 1 : static_cast<std::size_t>(hardware_hint);
 }
 
-void increment_saturated(std::atomic<std::uint64_t>& counter) noexcept {
-    auto current = counter.load(std::memory_order_relaxed);
-    while (current != std::numeric_limits<std::uint64_t>::max() &&
-           !counter.compare_exchange_weak(current, current + 1,
-                                          std::memory_order_relaxed,
-                                          std::memory_order_relaxed)) {
-    }
+// 统计计数器：relaxed fetch_add、uint64 直接回绕。饱和守卫只保留在
+// 协议字段（pending/提交门/epoch），统计字段命不中 2^64 且不参与协议。
+void increment_stat(std::atomic<std::uint64_t>& counter) noexcept {
+    counter.fetch_add(1, std::memory_order_relaxed);
 }
 
 void report_unhandled_exception(const char* context) noexcept {
@@ -249,6 +250,15 @@ struct ThreadPool::Impl {
 
         std::size_t index;
         Impl* owner;
+        // 每 worker 统计独立一行（§13）：owner 独写，无跨核争用；
+        // WorkerCtx 由 make_unique 逐个堆分配，行天然独立。
+        struct alignas(MAGPIE_CACHE_LINE) WorkerStats {
+            std::atomic<std::uint64_t> completed{0};    // 本 worker 执行完成
+            std::atomic<std::uint64_t> stolen{0};       // 本 worker 成功窃取项数
+            std::atomic<std::uint64_t> local_spills{0}; // 本 worker 本地满溢出次数
+        } stats;
+        static_assert(alignof(WorkerStats) >= MAGPIE_CACHE_LINE,
+                      "per-worker stats must occupy its own cache line");
 #if defined(MAGPIE_USE_WORK_STEALING)
 #if defined(MAGPIE_ENABLE_TEST_HOOKS)
         detail::DequeTestHooks local_hooks{
@@ -405,7 +415,7 @@ struct ThreadPool::Impl {
         delete task;
     }
 
-    void run_one(Task* task, bool worker_execution) noexcept {
+    void run_one(WorkerCtx* worker, Task* task, bool worker_execution) noexcept {
         {
             ExecutionScope scope(owner);
             try {
@@ -425,11 +435,10 @@ struct ThreadPool::Impl {
             delete task;
         }
 
-        increment_saturated(completed);
         if (worker_execution) {
-            increment_saturated(worker_completed);
+            increment_stat(worker->stats.completed);
         } else {
-            increment_saturated(inline_completed);
+            increment_stat(inline_completed);
         }
         dec_pending();
     }
@@ -477,7 +486,7 @@ struct ThreadPool::Impl {
         GateGuard gate{this};
 
         if (stopping.load(std::memory_order_seq_cst)) {
-            increment_saturated(rejected);
+            increment_stat(submit_stats.rejected);
             task_owner.destroy();
             throw QueueFullError(QueueFullReason::ShuttingDown);
         }
@@ -489,12 +498,12 @@ struct ThreadPool::Impl {
             auto& context = *static_cast<WorkerCtx*>(current_owner_frame->worker);
             if (context.local.try_push(task_owner.task)) {
                 task_owner.forget();
-                increment_saturated(submitted);
+                increment_stat(submit_stats.submitted);
                 MAGPIE_TEST_HOOK(LocalPublished, context.index);
                 notify_local_ready();
                 return;
             }
-            increment_saturated(local_spills);
+            increment_stat(context.stats.local_spills);
             MAGPIE_TEST_HOOK(LocalFull, context.index);
             // Only the incoming task is forwarded. MPMC failure then takes
             // the existing worker CallerRuns path, regardless of external policy.
@@ -530,10 +539,10 @@ struct ThreadPool::Impl {
 
         if (queued) {
             pending_reserved = false;
-            increment_saturated(submitted);
+            increment_stat(submit_stats.submitted);
             if (discarded_task != nullptr) {
-                increment_saturated(rejected);
-                increment_saturated(discarded);
+                increment_stat(submit_stats.rejected);
+                increment_stat(submit_stats.discarded);
             }
             notify_queue_one();
             if (discarded_task != nullptr) {
@@ -543,14 +552,14 @@ struct ThreadPool::Impl {
             return;
         }
 
-        increment_saturated(rejected);
+        increment_stat(submit_stats.rejected);
         const bool must_run_inline = is_worker_thread() ||
                                      options.rejection == RejectionPolicy::CallerRuns;
         if (must_run_inline) {
             (void)task_owner.release();
             pending_reserved = false;
-            increment_saturated(submitted);
-            run_one(task, false);
+            increment_stat(submit_stats.submitted);
+            run_one(nullptr, task, false);
             return;
         }
 
@@ -569,7 +578,7 @@ struct ThreadPool::Impl {
         // The consumer may already have deleted Task. Only overwrite the owner
         // field; do not read/return the published pointer after successful try.
         task_owner.forget();
-        increment_saturated(submitted);
+        increment_stat(submit_stats.submitted);
         // Publication precedes notification. CV retains its mutex handshake;
         // EventCount advances epoch and signals independently registered slots.
 #if !defined(MAGPIE_USE_EVENT_COUNT)
@@ -581,18 +590,18 @@ struct ThreadPool::Impl {
 
     void submit_mpmc(TaskOwner& task_owner) {
         if (publish_mpmc(task_owner)) { return; }
-        increment_saturated(rejected);
+        increment_stat(submit_stats.rejected);
         if (is_worker_thread() || options.rejection == RejectionPolicy::CallerRuns) {
             auto* task = task_owner.release();
-            increment_saturated(submitted);
-            run_one(task, false);
+            increment_stat(submit_stats.submitted);
+            run_one(nullptr, task, false);
             return;
         }
         if (options.rejection == RejectionPolicy::DiscardOldest) {
             for (std::size_t retry = 0; retry < discard_retry_limit; ++retry) {
                 Task* dropped = nullptr;
                 if (!global_queue.discard_oldest(dropped)) { break; }
-                increment_saturated(discarded);
+                increment_stat(submit_stats.discarded);
                 destroy_task(dropped);
                 dec_pending();
                 if (publish_mpmc(task_owner)) { return; }
@@ -737,7 +746,7 @@ struct ThreadPool::Impl {
                 break;
             }
             context.batch[count++] = task;
-            increment_saturated(stolen);
+            increment_stat(context.stats.stolen);
         }
         return count ? transfer_batch(context, count, migrated) : nullptr;
     }
@@ -790,7 +799,7 @@ struct ThreadPool::Impl {
             bool migrated = false;
             auto* task = acquire_ready(context, false, migrated);
             if (post_return) {
-                increment_saturated(task ? post_wake_hit : post_wake_empty);
+                increment_stat(task ? event_probe.post_wake_hit : event_probe.post_wake_empty);
                 post_return = false;
             }
             // 用 != 而非 < 写上限：spin 单调递增，两者等价；!= 兼容 SPIN_LIMIT=0
@@ -816,7 +825,7 @@ struct ThreadPool::Impl {
                 }
                 MAGPIE_TEST_HOOK(AfterEventStopCheck, context.index);
                 task = acquire_ready(context, true, migrated);
-                increment_saturated(task ? pre_sleep_scan_hit : pre_sleep_scan_empty);
+                increment_stat(task ? event_probe.pre_sleep_scan_hit : event_probe.pre_sleep_scan_empty);
                 if (task) {
                     event_count.leave(context.index);
                 } else {
@@ -827,7 +836,7 @@ struct ThreadPool::Impl {
             // Never notify (generic takes another slot's mutex) or run user
             // code while retaining this worker's registration.
             if (migrated) { notify_local_ready(); }
-            if (task) { run_one(task, true); }
+            if (task) { run_one(&context, task, true); }
         }
     }
 #endif
@@ -882,7 +891,7 @@ struct ThreadPool::Impl {
             }
 #endif
             // All queue operations and the parking mutex are finished first.
-            run_one(task, true);
+            run_one(&context, task, true);
         }
 #endif
         MAGPIE_TEST_HOOK(WorkerExit, context.index);
@@ -908,7 +917,7 @@ struct ThreadPool::Impl {
         event_count.notify_one();
 #else
         queue_cv.notify_one();
-        increment_saturated(wakes);
+        increment_stat(wakes);
 #endif
     }
 
@@ -917,7 +926,7 @@ struct ThreadPool::Impl {
         event_count.notify_all();
 #else
         queue_cv.notify_all();
-        increment_saturated(wakes);
+        increment_stat(wakes);
 #endif
     }
 
@@ -970,8 +979,11 @@ struct ThreadPool::Impl {
         }, this};
 #endif
     detail::EventCount event_count;
-    std::atomic<std::uint64_t> post_wake_hit{0}, post_wake_empty{0};
-    std::atomic<std::uint64_t> pre_sleep_scan_hit{0}, pre_sleep_scan_empty{0};
+    // 事件统计低频（每次 wake 探测），合并一行与高频统计隔离。
+    struct alignas(MAGPIE_CACHE_LINE) EventProbeStats {
+        std::atomic<std::uint64_t> post_wake_hit{0}, post_wake_empty{0};
+        std::atomic<std::uint64_t> pre_sleep_scan_hit{0}, pre_sleep_scan_empty{0};
+    } event_probe;
 #endif
     std::vector<std::unique_ptr<WorkerCtx>> workers;
 #if !defined(MAGPIE_USE_MPMC)
@@ -981,20 +993,22 @@ struct ThreadPool::Impl {
 #endif
     mutable std::mutex queue_mutex;
     std::condition_variable queue_cv;
-    std::atomic<bool> stopping{false};
-    std::atomic<std::uint64_t> in_flight_submitters{0};
-    std::atomic<std::uint64_t> pending{0};
+    // 统计布局向 §13 对齐：shared 行（submitted/rejected/discarded）必须同行，
+    // pending、门、stopping、外联 inline 各单独行；per-worker 统计在 WorkerCtx。
+    alignas(MAGPIE_CACHE_LINE) std::atomic<bool> stopping{false};
+    alignas(MAGPIE_CACHE_LINE) std::atomic<std::uint64_t> in_flight_submitters{0};
+    alignas(MAGPIE_CACHE_LINE) std::atomic<std::uint64_t> pending{0};
     std::mutex drain_mutex;
     std::condition_variable drain_cv;
-    std::atomic<std::uint64_t> submitted{0};
-    std::atomic<std::uint64_t> rejected{0};
-    std::atomic<std::uint64_t> discarded{0};
-    std::atomic<std::uint64_t> completed{0};
-    std::atomic<std::uint64_t> worker_completed{0};
-    std::atomic<std::uint64_t> inline_completed{0};
-    std::atomic<std::uint64_t> wakes{0};
-    std::atomic<std::uint64_t> stolen{0};
-    std::atomic<std::uint64_t> local_spills{0};
+    struct alignas(MAGPIE_CACHE_LINE) SubmitLine {
+        std::atomic<std::uint64_t> submitted{0};
+        std::atomic<std::uint64_t> rejected{0};
+        std::atomic<std::uint64_t> discarded{0};
+    } submit_stats;
+    alignas(MAGPIE_CACHE_LINE) std::atomic<std::uint64_t> inline_completed{0};
+#if !defined(MAGPIE_USE_EVENT_COUNT)
+    alignas(MAGPIE_CACHE_LINE) std::atomic<std::uint64_t> wakes{0};
+#endif
     HandlerHolder handler;
 };
 
@@ -1059,16 +1073,25 @@ ThreadPool::Stats ThreadPool::stats() const noexcept {
     if (impl_ == nullptr) {
         return result;
     }
-    result.submitted = impl_->submitted.load(std::memory_order_relaxed);
-    result.rejected = impl_->rejected.load(std::memory_order_relaxed);
-    result.discarded = impl_->discarded.load(std::memory_order_relaxed);
-    result.completed = impl_->completed.load(std::memory_order_relaxed);
-    result.worker_completed = impl_->worker_completed.load(std::memory_order_relaxed);
+    result.submitted = impl_->submit_stats.submitted.load(std::memory_order_relaxed);
+    result.rejected = impl_->submit_stats.rejected.load(std::memory_order_relaxed);
+    result.discarded = impl_->submit_stats.discarded.load(std::memory_order_relaxed);
     result.inline_completed = impl_->inline_completed.load(std::memory_order_relaxed);
+    // per-worker 统计聚合：stats() 非热路径，聚合循环不进执行/提交热循环。
+    std::uint64_t worker_completed = 0, stolen = 0, local_spills = 0;
+    for (const auto& ctx : impl_->workers) {
+        worker_completed += ctx->stats.completed.load(std::memory_order_relaxed);
+        stolen += ctx->stats.stolen.load(std::memory_order_relaxed);
+        local_spills += ctx->stats.local_spills.load(std::memory_order_relaxed);
+    }
+    result.worker_completed = worker_completed;
+    result.completed = worker_completed + result.inline_completed;
+    result.stolen = stolen;
+    result.local_spills = local_spills;
     result.pending = impl_->pending.load(std::memory_order_relaxed);
+#if !defined(MAGPIE_USE_EVENT_COUNT)
     result.wakes = impl_->wakes.load(std::memory_order_relaxed);
-    result.stolen = impl_->stolen.load(std::memory_order_relaxed);
-    result.local_spills = impl_->local_spills.load(std::memory_order_relaxed);
+#endif
 #if defined(MAGPIE_USE_EVENT_COUNT)
     const auto event = impl_->event_count.snapshot();
     result.wakes = event.wakes;
@@ -1083,10 +1106,10 @@ ThreadPool::Stats ThreadPool::stats() const noexcept {
     result.wait_eagain = event.eagain;
     result.wait_eintr = event.eintr;
 #endif
-    result.post_wake_hit = impl_->post_wake_hit.load();
-    result.post_wake_empty = impl_->post_wake_empty.load();
-    result.pre_sleep_scan_hit = impl_->pre_sleep_scan_hit.load();
-    result.pre_sleep_scan_empty = impl_->pre_sleep_scan_empty.load();
+    result.post_wake_hit = impl_->event_probe.post_wake_hit.load();
+    result.post_wake_empty = impl_->event_probe.post_wake_empty.load();
+    result.pre_sleep_scan_hit = impl_->event_probe.pre_sleep_scan_hit.load();
+    result.pre_sleep_scan_empty = impl_->event_probe.pre_sleep_scan_empty.load();
 #endif
     return result;
 }

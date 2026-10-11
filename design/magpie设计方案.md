@@ -774,7 +774,7 @@ submitted/rejected/discarded 共享行，pending 单独行，门单独行；每 
 
 目标 EventCount 版本每次成功提交的共享 RMW 至少：门++/--、pending++、submitted++、epoch推进；完成 pending--。M1 没有 epoch，使用 mutex ring 与 condition_variable；其 `wakes` 记录实际调用 `notify_one`/`notify_all` 的次数，不代表被 OS 唤醒的线程数。stats 按项 relaxed load，允许瞬时不自洽；完全 quiescent、无成员调用时 submitted=completed+discarded 且 pending=0，rejected 不是该恒等式的减项。
 
-Stats 完整定义见 §6.2，计数字段 uint64_t、wake_threads optional<uint64_t>；统计回绕另用明确饱和策略，不用 stats 参与业务协议。inline_completed 包括 worker 线程在 submit 内的 CallerRuns，不能按当前 OS 线程身份将其计入 worker_completed。
+Stats 完整定义见 §6.2，计数字段 uint64_t、wake_threads optional<uint64_t>；统计计数用 relaxed fetch_add、允许 uint64 wrap（实践不可触及，不设饱和），协议字段（pending、提交门、epoch）保持上限 fail-fast——stats 不参与业务协议。inline_completed 包括 worker 线程在 submit 内的 CallerRuns，不能按当前 OS 线程身份将其计入 worker_completed。
 
 ## 14. 性能验收
 
@@ -783,11 +783,12 @@ Stats 完整定义见 §6.2，计数字段 uint64_t、wake_threads optional<uint
 | 指标 | 基准 | 初值 |
 |---|---|---|
 | 单 worker 空任务吞吐 | bench_empty_task，无 CallerRuns，固定 producer 配置 | ≥1.0×10^6 worker completions/s |
-| Worker scaling | bench_worker_scaling，本地非阻塞产生工作，固定 driver，inline 单列 | T8/T1≥6.4，前提供给充足（WSL2 验收环境登记值 ≥2.0，见机器登记） |
+| Worker scaling | bench_worker_scaling，本地非阻塞产生工作，固定 driver，inline 单列 | T8/T1≥6.4，前提供给充足（WSL2 环境登记值 ≥2.0 **已于 2026-10-12 撤销，归因待重做**，见机器登记） |
 | Skew degradation | bench_skew，相同资源/任务工作量 | 吞吐损失≤20% |
 | p99 regression | bench_latency，同日重跑冻结基线 | ≤1.05×且无新峰 |
 | 空载 CPU | bench_idle_cpu，10s | ≤3%/worker |
 | 对比 speedup | bench_baselines，同资源/同任务数 | vs 显式 launch::async ≥2×；vs 每任务一线程 ≥10×（WSL2 验收环境登记值 ≥3.0×，见机器登记） |
+| 多 worker 亚微秒扩展与 CPU 放大（gate 7，2026-10-12 新增） | bench_worker_scaling payload ∈ {empty, cpu/work=64, cpu/work=256} 三档分别报告 T8/T1（完成速率）与每叶 CPU 放大比（process_cpu/叶 ÷ T1 同负载每叶 CPU） | 判定阈值待交叉定位与修复后标定；当前为必测报告项，实测 0.47×/1.07×/2.74× 与 13.6×/6.1×/2.5×（2026-10-12，WSL2），该项未关闭 |
 
 worker scaling 测量独立于多 producer 全局提交吞吐；不以增加 producer 或其 CallerRuns 完成数制造 worker 扩展性。W2.6 记录是否因供给不足无法判断，不能把不可用数据当通过。硬件导致门槛调整需双侧数据与理由，不能无证声称目标已达到。
 
@@ -795,7 +796,7 @@ worker scaling 测量独立于多 producer 全局提交吞吐；不以增加 pro
 
 **同名门槛的环境修订（2026-10-11，用户批准）：** 两项初值在 WSL2 共享 vCPU 环境下不可达，按硬件导致调整通道登记环境特定值，均附双侧数据（M6 记录 `results/m6-20261011/`，本机归档）：
 
-- T8/T1：6.4 → **≥2.0**。实测默认点 2.245，五轴 24 标定点范围 2.03–2.58；单 worker 空任务 5.0M/s 亦证明供给路径本身充足，8 vCPU 为宿主分时共享、固定 driver 单点供给为环境性瓶颈；skew 与 p99 门槛用更严格的越界上界守卫（skew 损失−4.3%，p99 三饱和点与 mutex 基线比 0.65–1.00×）。
+- T8/T1：6.4 → **≥2.0 已撤销（2026-10-12）**。撤销原因：核实发现归因证据不成立——「单 worker 空任务 5.0M/s 证明供给充足」是 W1/P1 无争用点，不能排除多 worker 共享结构瓶颈；三档 payload 交叉测量显示亚微秒任务下 T8 完成速率仅 T1 的 0.47×、每叶 CPU 放大 13.6×（修复 1.1–1.3 后仍成立），而 M6 门禁集合无「多 worker + 亚微秒」观察项。登记降级为「归因待重做」：原始数据与 24 点范围（2.03–2.58）保留，阈值判定开放，待交叉定位（spin/共享争用分项）与修复后重新标定。新增 gate 7（三档 payload 扩展与 CPU 放大，见 §14.1 附表）。
 - 每任务一线程：10× → **≥3.0×**。实测 3.76×（pool 113.4k vs thread 30.0k ops/s，bench_baselines cpu payload），线程创建/销毁约 33μs/任务已占大头，剩余比例被任务执行时间稀释；async 对比 3.80× 无需修订。
 - 原物理 Linux 初值保留为物理机复查基准。修订只改环境判定值，不改测量协议；未挑负载、未放宽资源预算。
 
@@ -833,7 +834,7 @@ inline constexpr std::size_t CACHE_LINE = 64; // 实现由构建宏覆盖
 inline constexpr std::size_t BULK_LIMIT = 32;
 inline constexpr std::size_t STEAL_CAP = 64; // 池层重复单项 steal 次数
 inline constexpr std::size_t BATCH_CAP = BULK_LIMIT > STEAL_CAP ? BULK_LIMIT : STEAL_CAP;
-inline constexpr int SPIN_LIMIT = 64;
+inline constexpr int SPIN_LIMIT = 1024; // 2026-10-12：64 在短突发下过早停车（见 M6 §10），1024 由标定与复现支撑
 inline constexpr int YIELD_LIMIT = 8;
 inline constexpr int VICTIM_TRIES = 1;
 inline constexpr int DISCARD_RETRY_LIMIT = 2;

@@ -39,14 +39,8 @@ std::size_t EventCount::validate(std::size_t count) {
     return count;
 }
 void EventCount::add(std::atomic<std::uint64_t>& value, std::uint64_t amount) noexcept {
-    auto old = value.load(std::memory_order_relaxed);
-    for (;;) {
-        const auto room = std::numeric_limits<std::uint64_t>::max() - old;
-        const auto next = old + (amount < room ? amount : room);
-        if (value.compare_exchange_weak(old, next, std::memory_order_relaxed)) {
-            return;
-        }
-    }
+    // 统计计数允许 uint64 wrap；epoch/注册数等协议字段不经过本函数。
+    value.fetch_add(amount, std::memory_order_relaxed);
 }
 [[noreturn]] void EventCount::fail(const char* message, int error) noexcept {
     std::fprintf(stderr, "magpie: %s (errno=%d)\n", message, error);
