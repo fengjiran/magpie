@@ -1,4 +1,6 @@
 #include <magpie/thread_pool.hpp>
+#include <magpie/build_config.hpp>
+#include <string_view>
 
 #if defined(MAGPIE_ENABLE_TEST_HOOKS)
 #include <magpie/detail/test_hooks.hpp>
@@ -199,8 +201,15 @@ TEST(ThreadPool, SubmitAndDrain) {
     EXPECT_EQ(sum.load(std::memory_order_relaxed), 100);
     const auto stats = pool.stats();
     EXPECT_EQ(stats.pending, 0U);
-    EXPECT_GT(stats.wakes, 0U);
-    EXPECT_FALSE(stats.wake_threads.has_value());
+    if (std::string_view(MAGPIE_BUILD_PARKING_BACKEND) == "cv") {
+        EXPECT_GT(stats.wakes, 0U);
+    } else {
+        // EventCount counts backend wake calls, not publication requests.
+        EXPECT_GT(stats.epoch, 0U);
+    }
+    EXPECT_EQ(stats.wake_threads.has_value(),
+              std::string_view(MAGPIE_BUILD_PARKING_BACKEND) == "eventcount" &&
+              std::string_view(MAGPIE_BUILD_EVENTCOUNT_BACKEND) == "futex");
     EXPECT_EQ(stats.submitted, stats.completed + stats.discarded);
     EXPECT_EQ(stats.completed, stats.worker_completed + stats.inline_completed);
 }
@@ -463,6 +472,7 @@ TEST(ThreadPool, WorkerSubmitsChild) {
 }
 
 TEST(ThreadPool, WorkerFullQueueFallsBackToCallerRunsUnderAbortPolicy) {
+    if (MAGPIE_ENABLE_WORK_STEALING) { GTEST_SKIP() << "global-only invariant; M4 local+global full has a separate regression"; }
     auto options = one_worker_options(magpie::RejectionPolicy::Abort);
     magpie::ThreadPool pool(options);
     std::latch worker_entered(1);

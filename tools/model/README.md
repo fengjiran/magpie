@@ -33,3 +33,29 @@ python3 tools/model/run_mpmc_models.py \
 复用本机已验证的 GenMC0.17.0/LLVM19.1.7，不升级或安装工具。`mpmc/queue.c` 将当前 header 的 relaxed position CAS、seq acquire/release、普通 data 和 weak try 分支投影为 C11。容量2、2 producer、1/2 consumer、最多3个 accepted ticket，含物理槽复用；main join 后校核 accepted 与 consumed ID。记录 complete 和 blocked executions，blocked 不当作已验证活性。
 
 负例只将 seq release 移到普通 payload 写之前；runner 必须看到精确 Non-atomic race 分类、marker 指定写入源行/slot data 和非空 DOT，不能把任意前端错误当反例。归档记录模型、header 和 runner hash。生产 header 的分配、type traits、指针 ownership、64位/溢出 guard 不在 C11 模型中，另用实际 C++ 正式测试；这不是完整 C++ implementation 的模型证明。
+
+## M4 Chase-Lev 协议投影
+
+```sh
+python3 tools/model/run_deque_models.py \
+  --genmc build/tools/genmc-v0.17.0-build/bin/genmc \
+  --output-dir results/m4/NEW_RC11_RUN
+```
+
+固定GenMC0.17.0/LLVM19.1.7，runner拒绝版本漂移与覆盖旧目录。`deque/core.c`投影signed indices、atomic slots、普通payload发布、双侧SC fence、SC成功/失败CAS及稳定b+1恢复；容量2、owner+1/2thief、最多3个ID，含物理槽复用。普通payload只在赢得ownership后读取，main join后校核所有成功ID。SINGLE专门检查最后项竞争恢复空；BAD_RESTORE仅用改写后的expected恢复，必须到达指定一致边界断言并输出非空DOT。
+
+`deque/owner_pops.c`固定R1交错：容量8，thief候选暂停，owner连续5次pop，然后thief认领单项；OLD_BATCH改为一次CAS领取4项，必须命中指定重复ID断言。它有意使用release/acquire门控交错，只证明该反例，不覆盖一般调度。正例要求非零complete、无error、无graph；负例检查Safety violation、marker对应源行和完整断言文本、非空DOT，不能把前端错误当反例。
+
+这些是有限C11安全性投影，非整个C++20类型/RAII、指针对象lifetime、allocator、64位上限、操作系统或任意规模活性证明；上述边界另靠C++正式回归、sanitizer和平台测试。实际计数与source/runner/header身份见 [M4 milestone](../../docs/milestones/M4.md)。
+
+## M5 EventCount 协议投影
+
+```sh
+python3 tools/model/run_event_count_models.py \
+  --genmc build/tools/genmc-v0.17.0-build/bin/genmc \
+  --output-dir results/m5/NEW_RC11_RUN
+```
+
+固定 GenMC0.17.0/LLVM19.1.7，保存模型、相关生产源和runner身份。core 用C11 SC原子及抽象的compare/park/wake覆盖1/2/3 worker、两轮注册、notify_one/notify_all并发与shutdown；并发通知组合在单worker重注册场景，多worker场景主要检查关闭握手。generic投影把CAS与predicate放在同一个模拟mutex内，futex投影把CAS和内核窗口分开。R6缺少注册后stop重查、R5旧共享generation为指定断言负例。
+
+这不是Linux syscall运行，也不是完整C++对象或池级活性证明。模型的最终parked状态不能证明Task一定推进；M5全批迁移循环由实际池的执行项保留回归及变异负例守护。blocked单独记录，不作为活性成功。原生EAGAIN/EINTR/spurious、ABI和join后注册归零另由Linux测试验收，实际状态见 [M5 milestone](../../docs/milestones/M5.md)。

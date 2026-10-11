@@ -17,8 +17,10 @@ on:
 
 jobs:
   linux:
-    name: Linux / ${{ matrix.preset }} / ${{ matrix.compiler }} / ${{ matrix.queue }}
+    name: Linux / ${{ matrix.preset }} / ${{ matrix.compiler }} / ${{ matrix.queue }} / stealing=${{ matrix.stealing }} / ${{ matrix.parking }}-${{ matrix.event_backend }}
     runs-on: ubuntu-latest
+    # GCC -Wtsan diagnoses atomic_thread_fence as unsupported. Keep -Werror
+    # and the real fences; use Clang for this sanitizer job.
     strategy:
       fail-fast: false
       matrix:
@@ -26,34 +28,112 @@ jobs:
           - preset: release
             compiler: g++
             queue: mutex
+            stealing: "OFF"
+            parking: cv
+            event_backend: auto
           - preset: tsan
-            compiler: g++
+            compiler: clang++
             queue: mutex
+            stealing: "OFF"
+            parking: cv
+            event_backend: auto
           - preset: asan-ubsan
             compiler: g++
             queue: mutex
+            stealing: "OFF"
+            parking: cv
+            event_backend: auto
           - preset: release
             compiler: clang++
             queue: mutex
+            stealing: "OFF"
+            parking: cv
+            event_backend: auto
           - preset: release
             compiler: g++
             queue: mpmc
+            stealing: "OFF"
+            parking: cv
+            event_backend: auto
           - preset: tsan
-            compiler: g++
+            compiler: clang++
             queue: mpmc
+            stealing: "OFF"
+            parking: cv
+            event_backend: auto
           - preset: asan-ubsan
             compiler: g++
             queue: mpmc
+            stealing: "OFF"
+            parking: cv
+            event_backend: auto
           - preset: release
             compiler: clang++
             queue: mpmc
+            stealing: "OFF"
+            parking: cv
+            event_backend: auto
+          - preset: release
+            compiler: g++
+            queue: mpmc
+            stealing: "ON"
+            parking: cv
+            event_backend: auto
+          - preset: tsan
+            compiler: clang++
+            queue: mpmc
+            stealing: "ON"
+            parking: cv
+            event_backend: auto
+          - preset: asan-ubsan
+            compiler: g++
+            queue: mpmc
+            stealing: "ON"
+            parking: cv
+            event_backend: auto
+          - preset: release
+            compiler: clang++
+            queue: mpmc
+            stealing: "ON"
+            parking: cv
+            event_backend: auto
+          - preset: release
+            compiler: g++
+            queue: mpmc
+            stealing: "ON"
+            parking: eventcount
+            event_backend: futex
+          - preset: tsan
+            compiler: clang++
+            queue: mpmc
+            stealing: "ON"
+            parking: eventcount
+            event_backend: futex
+          - preset: asan-ubsan
+            compiler: g++
+            queue: mpmc
+            stealing: "ON"
+            parking: eventcount
+            event_backend: futex
+          - preset: release
+            compiler: clang++
+            queue: mpmc
+            stealing: "ON"
+            parking: eventcount
+            event_backend: futex
+          - preset: release
+            compiler: g++
+            queue: mpmc
+            stealing: "ON"
+            parking: eventcount
+            event_backend: generic
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
       - name: Configure
-        run: cmake --preset "${{ matrix.preset }}" -DCMAKE_CXX_COMPILER="${{ matrix.compiler }}" -DMAGPIE_BUILD_BENCHMARKS=ON -DMAGPIE_QUEUE_BACKEND="${{ matrix.queue }}"
+        run: cmake --preset "${{ matrix.preset }}" -DCMAKE_CXX_COMPILER="${{ matrix.compiler }}" -DMAGPIE_BUILD_BENCHMARKS=ON -DMAGPIE_QUEUE_BACKEND="${{ matrix.queue }}" -DMAGPIE_ENABLE_WORK_STEALING="${{ matrix.stealing }}" -DMAGPIE_PARKING_BACKEND="${{ matrix.parking }}" -DMAGPIE_EVENTCOUNT_BACKEND="${{ matrix.event_backend }}"
       - name: Build
         run: cmake --build --preset "${{ matrix.preset }}" --parallel 2
       - name: Run fast tests

@@ -173,7 +173,8 @@ Result pool_run(const Config& c, double duration, bool measured) {
                         auto arrival = Clock::time_point{};
                         if (c.arrival_rate > 0) {
                             // Absolute deadlines avoid coordinated omission:
-                            // late arrivals are submitted immediately, never rescheduled from now.
+                            // late arrivals are submitted immediately, never rescheduled from
+                            // now.
                             const double offset =
                                 static_cast<double>(counters.attempts * c.producers + producer) /
                                 c.arrival_rate;
@@ -387,7 +388,8 @@ Result controlled_run(const Config& c, double duration) {
                         const auto cpu_start = thread_cpu();
                         while (Clock::now() < deadline) {
                             ++p.attempts;
-                            // Queue-only uses a stable non-owning sentinel, never dereferenced.
+                            // Queue-only uses a stable non-owning sentinel, never
+                            // dereferenced.
                             std::unique_ptr<Task> task;
                             if (c.mode != "queue" && !mpmc) {
                                 task = std::make_unique<TaskImpl<EmptyCallable>>(EmptyCallable{});
@@ -479,6 +481,65 @@ Result burst_run(const Config& c, double duration) {
     r.window_seconds = seconds(Clock::now() - begin);
     finish_pool(r, fixture, begin, cpu_begin);
     r.attempts = r.accepted = r.stats.submitted;
+    r.peak_threads_bound = 1 + c.workers;
+    return r;
+}
+
+// A fixed inventory per batch. The driver starts roots one by one and waits
+// for their readiness before releasing them together. This prevents global
+// bulk receive from parking all roots behind one blocked owner. Only the
+// fixture roots wait; generated tasks never wait on this pool's futures.
+Result local_batch_run(const Config& c, double duration) {
+    PoolFixture fixture(c);
+    Payload payload(c);
+    const auto roots = c.spawn_pattern == "hotspot" ? std::size_t{1} : c.workers;
+    const auto begin = Clock::now();
+    const auto cpu_begin = process_cpu();
+    const auto driver_cpu_begin = thread_cpu();
+    Result r;
+    std::uint64_t batch = 0;
+    do {
+        std::latch release(1);
+        std::atomic<std::size_t> ready{0};
+        bool released = false;
+        try {
+            for (std::size_t root = 0; root < roots; ++root) {
+                fixture.pool->submit([&, root] {
+                    ready.store(root + 1, std::memory_order_release);
+                    ready.notify_one();
+                    release.wait();
+                    const auto first = c.task_count * root / roots;
+                    const auto last = c.task_count * (root + 1) / roots;
+                    for (auto leaf = first; leaf < last; ++leaf) {
+                        fixture.pool->submit(
+                            [&, leaf] { payload(c.seed + batch * c.task_count + leaf); });
+                    }
+                });
+                for (auto observed = ready.load(std::memory_order_acquire); observed != root + 1;
+                     observed = ready.load(std::memory_order_acquire)) {
+                    ready.wait(observed, std::memory_order_acquire);
+                }
+            }
+            release.count_down();
+            released = true;
+            fixture.pool->drain();
+        } catch (...) {
+            if (!released) { release.count_down(); }
+            fixture.pool->shutdown();
+            fixture.pool->drain();
+            throw;
+        }
+        r.root_tasks += roots;
+        r.leaf_tasks += c.task_count;
+        ++batch;
+    } while (seconds(Clock::now() - begin) < duration);
+    r.submit_cpu_seconds = thread_cpu() - driver_cpu_begin;
+    r.window_seconds = seconds(Clock::now() - begin);
+    finish_pool(r, fixture, begin, cpu_begin);
+    r.attempts = r.accepted = r.stats.submitted;
+    if (r.stats.submitted != r.root_tasks + r.leaf_tasks) {
+        throw std::runtime_error("local batch inventory mismatch");
+    }
     r.peak_threads_bound = 1 + c.workers;
     return r;
 }
@@ -673,6 +734,9 @@ Result shutdown_run(const Config& c) {
 } // namespace
 
 Result run(const Config& c, double duration, bool measured) {
+    if (c.program == "bench_worker_scaling" || c.program == "bench_skew") {
+        return local_batch_run(c, duration);
+    }
     if (c.program == "bench_idle_cpu") {
         return idle_run(c, duration);
     }

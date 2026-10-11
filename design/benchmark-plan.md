@@ -94,3 +94,15 @@ W1.7冻结基线；W2.2提交/producer路径；W2.4worker scaling/skew/fallback�
 ## 9. 结果模板
 
 每组记录环境、原始TSV、基线binary checksum、资源和语义一致性、五问的机制解释，以及接受/回退/标定/立项结论。未完成正确性前置的变体不得作为可发布性能版本。
+
+## M4 当前有限批 fixture
+
+新增 `bench_worker_scaling` 和 `bench_skew`：每批固定 `task-count` 个子项，uniform由全部workers各自启动一个root并均分ID区间，hotspot仅一个root。driver逐一提交root并等待其ready，再统一释放，防止全局bulk领取将多个阻塞root停在同一owner后面。fixture root只等待外部释放，不等待本池future；子项完全非阻塞。准备/释放/排空时间包含在窗口内，重复完整批至deadline；两模式总leaf工作量相同，root数量不同且单独记录。
+
+外部root必须Abort，内部满仍可能CallerRuns；`worker_leaf_ops_s` 从worker_completed减去root，inline单列。报告 `root_tasks`/`leaf_tasks`、local/total slots、successful steal/local spill、driver CPU与process-minus-driver的worker CPU近似。此fixture不采集任务latency，输出NA；p99沿用单独latency程序。总buffer随worker数变化，不能把更大缓存收益归因于单项deque。
+
+M4实际本机代表点与未测资源见 [M4 milestone](../docs/milestones/M4.md)。正式T8/T1、偏斜与六项门槛仍在固定物理Linux验收；不把unbound macOS数据当达标证据。
+
+## M5 开发对照边界
+
+M5提供真实池的稀疏发布/通知统计，当前以generic EventCount和同源码CV作开发对照，记录空任务、稀疏到达p99、空载与有限存量关停CPU。稀疏发布不保证指定注册数，不当作独立notify原语成本。每槽状态/扫描和真实syscall采样仍需Linux；状态、源码身份和五问见 [M5 milestone](../docs/milestones/M5.md)。

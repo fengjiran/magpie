@@ -41,6 +41,38 @@ concept TaskCallable =
     std::invocable<std::decay_t<F>&> &&
     std::is_nothrow_destructible_v<std::decay_t<F>>;
 
+namespace detail {
+
+template <class F>
+class AsyncTask final : public Task {
+public:
+    using Result = std::invoke_result_t<F&>;
+
+    template <class G>
+        requires std::constructible_from<F, G&&>
+    explicit AsyncTask(G&& f)
+        : callable_(std::forward<G>(f)),
+          packaged_([this]() -> Result { return std::invoke(callable_); }) {}
+
+    // The packaged callback borrows this address; only Task* crosses queues.
+    AsyncTask(const AsyncTask&) = delete;
+    AsyncTask& operator=(const AsyncTask&) = delete;
+    AsyncTask(AsyncTask&&) = delete;
+    AsyncTask& operator=(AsyncTask&&) = delete;
+
+    std::future<Result> get_future() { return packaged_.get_future(); }
+    void run() override { packaged_(); }
+
+private:
+    // Future implementations may retain the packaged callback in shared state.
+    // Keep user ownership here so deletion under ExecutionScope retires F before
+    // pending is decremented, regardless of how long the future is retained.
+    F callable_;
+    std::packaged_task<Result()> packaged_;
+};
+
+}  // namespace detail
+
 enum class RejectionPolicy { CallerRuns, Abort, DiscardOldest };
 enum class QueueFullReason { QueueFull, ShuttingDown };
 
@@ -79,10 +111,9 @@ public:
     template <TaskCallable F>
     auto submit_async(F&& f)
         -> std::future<std::invoke_result_t<std::decay_t<F>&>> {
-        using Result = std::invoke_result_t<std::decay_t<F>&>;
-        std::packaged_task<Result()> packaged(std::forward<F>(f));
-        auto future = packaged.get_future();
-        submit_task(new TaskImpl<std::packaged_task<Result()>>(std::move(packaged)));
+        auto task = std::make_unique<detail::AsyncTask<std::decay_t<F>>>(std::forward<F>(f));
+        auto future = task->get_future();
+        submit_task(task.release());
         return future;
     }
 
@@ -107,6 +138,13 @@ public:
         std::uint64_t pre_sleep_scan_hit = 0;
         std::uint64_t pre_sleep_scan_empty = 0;
         std::uint64_t notify_scan_slots = 0;
+        std::uint64_t epoch = 0;
+        std::uint64_t registered_waiters = 0;
+        std::uint64_t wait_calls = 0;
+        std::uint64_t wait_returns = 0;
+        std::optional<std::uint64_t> wait_syscalls;
+        std::optional<std::uint64_t> wait_eagain;
+        std::optional<std::uint64_t> wait_eintr;
     };
 
     [[nodiscard]] Stats stats() const noexcept;

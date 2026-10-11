@@ -9,6 +9,17 @@ namespace magpie {
 
 const char* global_queue_backend() noexcept { return MAGPIE_BUILD_QUEUE_BACKEND; }
 
+const char* scheduling_backend() noexcept {
+#if MAGPIE_ENABLE_WORK_STEALING
+    return "work-stealing";
+#else
+    return "global";
+#endif
+}
+
+const char* parking_backend() noexcept { return MAGPIE_BUILD_PARKING_BACKEND; }
+const char* event_count_backend() noexcept { return MAGPIE_BUILD_EVENTCOUNT_BACKEND; }
+
 BuildInfo build_info() noexcept {
     return {
         MAGPIE_BUILD_VERSION,

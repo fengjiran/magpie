@@ -107,7 +107,7 @@ def environment():
 
 def load_config(path):
     values = json.loads(Path(path).read_text()) if path else {}
-    if not isinstance(values, dict) or any(k not in DEFAULTS and k not in {"worker-cpus", "producer-cpus"} for k in values):
+    if not isinstance(values, dict) or any(k not in DEFAULTS and k not in {"worker-cpus", "producer-cpus", "local-capacity", "spawn-pattern"} for k in values):
         raise ValueError("configuration must contain only known benchmark keys")
     if any(isinstance(value, (list, dict, bool)) or value is None for value in values.values()):
         raise ValueError("configuration values must be scalar strings or numbers")
@@ -148,7 +148,7 @@ def run_series(binary, config, output, repeat, smoke, physical=False, profile=Fa
         raise ValueError("physical Linux runs require Linux and explicit worker/producer CPU sets")
     manifest["environment"]["physical_linux"] = "operator-attested" if physical else "not-attested"
     manifest["measurement_protocol_met"] = protocol
-    manifest["formal_platform_eligible"] = bool(physical and protocol and not profile)
+    manifest["formal_platform_eligible"] = bool(physical and protocol and not smoke and not profile)
     manifest["timing_scope"] = "fixed window plus quiescent tail; shutdown uses finite inventory"
     manifest["attribution"] = "controlled queue/wrapping contrasts; no additive decomposition or isolated gate/epoch timing"
     manifest_path = output / "manifest.json"
@@ -312,7 +312,7 @@ def replay(args):
     comparison = {"baseline_commit": metadata["baseline_commit"], "same_environment": same_environment,
                   "same_day": same_day, "same_config": current["config_hash"] == initial["config_hash"],
                   "baseline_binary_sha256": metadata["binary_sha256"], "median_ratio": median / reference if reference else None,
-                  "formal_ab_eligible": bool(same_environment and same_day and current["formal_platform_eligible"] and initial["formal_platform_eligible"]),
+                  "formal_ab_eligible": bool(same_environment and same_day and current["formal_platform_eligible"] and initial["formal_platform_eligible"] and not initial.get("smoke", False)),
                   "interpretation": "baseline repeatability only; no new mechanism compared"}
     (args.output / "comparison.json").write_text(json.dumps(comparison, indent=2))
 
@@ -348,9 +348,22 @@ def suite(args, base):
                  "not_applicable": {"bench_worker_scaling": "no local deque/spawn/steal path in M1",
                                     "bench_skew": "no local victim distribution in M1",
                                     "bench_notify_scan": "no EventCount/WaitSlot in M1"}}
+    cases = suite_configs()
+    help_text = execute([str(args.binary.resolve()), "--help"]).stdout
+    if "--local-capacity" in help_text:
+        inventory["not_applicable"].pop("bench_worker_scaling")
+        inventory["not_applicable"].pop("bench_skew")
+        for workers in (1, 2, 4, 8):
+            cases.append(("workers-%d" % workers, {"program": "bench_worker_scaling", "workers": workers, "task-count": 4096, "local-capacity": 4096, "payload": "cpu", "work": 256}))
+        for pattern in ("hotspot", "uniform"):
+            cases.append(("skew-" + pattern, {"program": "bench_skew", "workers": 4, "task-count": 4096, "local-capacity": 4096, "payload": "cpu", "work": 256, "spawn-pattern": pattern}))
+        inventory["local_path"] = "inspect TSV backend; global build provides global worker-spawn control"
+    if "bench_notify_scan" in help_text:
+        for workers in (1, 4, 8):
+            cases.append(("notify-%d" % workers, {"program": "bench_notify_scan", "workers": workers, "arrival-rate": 1000, "sample-stride": 1}))
     manifest = args.output / "suite.json"
     try:
-        for name, changes in suite_configs():
+        for name, changes in cases:
             config = dict(base, **changes)
             if args.smoke:
                 config.update({"warmup": .01, "duration": .03, "sample-stride": 16})
@@ -360,6 +373,8 @@ def suite(args, base):
                               args.physical_linux_attested, args.profile)
             inventory["cases"].append({"name": name, "result": "passed", "config_hash": config_hash(config)})
             if name == "empty":
+                if "eventcount" in rows[0]["backend"]:
+                    inventory["not_applicable"].pop("bench_notify_scan", None)
                 saturation = statistics.median(float(row["worker_ops_s"]) for row in rows)
                 inventory["latency_calibration"] = {"same_binary_config": config, "worker_saturation_ops_s": saturation}
         for fraction in (.1, .5, .9):

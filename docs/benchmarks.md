@@ -1,6 +1,6 @@
 # M2 benchmark 使用与证据边界
 
-当前 harness 测量固定 worker + 全局有界 mutex ring + condition_variable 基线。它没有修改生产 ThreadPool，也没有接入 MPMC、Chase-Lev 或 EventCount。Linux/macOS 可构建；Windows 的 CPU clock/affinity 尚未实现，启用 benchmark 会明确报错，普通库构建不受影响。
+当前 harness 默认测 mutex/global/CV 基线，也可测 MPMC、Chase-Lev 和 M5 EventCount 候选。Linux/macOS 可构建；Windows 的 CPU clock/affinity 尚未实现，启用 benchmark 会明确报错，普通库构建不受影响。
 
 ## 构建与 smoke
 
@@ -28,7 +28,7 @@ benchmark opt-in，生产库没有新增运行时依赖。Release 生产库与 h
 | bench_alloc_cost | same：同线程 TaskImpl new/delete；cross：producer 分配、单 consumer 删除；不可入队的包装由 producer 删除，两个销毁计数分开 |
 | bench_shutdown_drain | 提交有限存量后先 shutdown，再释放工作门、drain、销毁/join；分别报告 wall 和 process CPU、所有任务 body 的 thread CPU |
 
-`bench_worker_scaling`、`bench_skew`、`bench_notify_scan` 在 M1 不适用，suite 清单明确登记原因；不能用外部 producer 数变化冒充本地 spawn/steal scaling。树中的 inline fallback 计入 inline_completed，不计入 worker_completed。
+M4 harness 新增 `bench_worker_scaling` 和 `bench_skew`，global 构建可作 worker-spawn 对照；M5 新增 `bench_notify_scan` 稀疏发布程序，CV 可作控制组。旧冻结 binary 的 suite 仍保留其版本边界。不能用外部 producer 数变化冒充本地 scaling；inline fallback 单列。
 
 `queue` fixture 不是生产私有 ring 的直接入口，没有 Gate/pending/通知。`wrap`、`queue`、`pool` 的差异是受控对照，不能简单相减得出某个 RMW 的独立耗时。尚未对 gate/pending/submitted 单独硬件采样；Linux 可以另用 `--profile` 保留 perf stat 的 cycles/instructions/cache-misses/context-switches/cpu-migrations。profile 数据与无 profiler 的测量分组，不能拼接 A/B；不存在的 epoch/WaitSlot/slot seq 成本为不适用。
 
@@ -76,6 +76,8 @@ freeze 在临时 clone 中覆盖当前源码快照、生成独立 baseline commi
 
 replay 在执行前校核 binary、bundle、初次 raw TSV 和配置身份，使用冻结配置；不重新编译，不覆盖初次历史。每组默认≥5个独立进程、warmup≥2 s、固定时间程序 duration≥10 s；`--smoke` 明确降级。原始 TSV、命令/exit code/stdout/stderr、环境、median/Q1/Q3/IQR、同日/资源一致性和 repeatability ratio 都保留。formal A/B 还要求同日、同资源、物理 Linux，且无 profiler；重复性比值本身不是优化 speedup。
 
+replay 的 `--smoke` 保留冻结配置和窗口，但无论 repeat/warmup/duration 是否达到数值要求，正式平台与 A/B 资格都为 false。初始归档若标记 smoke，即使旧 runner 曾错误写入 eligible=true，也不能成为正式对照来源。
+
 可恢复源码：
 
 ```sh
@@ -92,3 +94,17 @@ M2 只冻结 correctness 基线与测量机制，不关闭主设计的六项性�
 完整池只由库的编译 backend 决定，`global_queue_backend()` 给 TSV 的 `generic/pthread-mutex/mpmc-cv` 标签；旧 M2 frozen binary 的 mutex 标签保持不变。同机器/config 的原 binary 复跑和候选运行必须校核各自 checksum、commit/source identity。两种弱/强 unavailable 频率会影响拒绝数，应同时报告 attempts/accepted/refused 和 worker/inline，不按逻辑深度推导 full。
 
 M3 仍需通知 mutex 与 gate/pending/submitted/alloc，没有 epoch。本机对照只用于机制研究，固定物理 Linux/完整资源与矩阵缺口仍然存在。具体数据、失败现场与五问见 [M3 milestone](milestones/M3.md)。
+
+## M4 本地路径
+
+使用 `bench-workstealing` preset。`--local-capacity N` 记录真实每worker槽数，默认16；`--spawn-pattern uniform|hotspot`控制worker根任务分布，不把外部producer变化当热点。worker scaling与skew使用固定`--task-count`子项批，外部Abort；只fixture root等driver释放，子项不等待future。root数量、leaf数量、worker叶吞吐、inline比例与成功窃取分别输出。准备/排空开销包含在测量窗口，driver CPU单列，worker CPU为process减driver的近似；这两个fixture无latency采样，p99为NA，必须另跑latency负载。
+
+新版suite通过binary的`--help`检测新参数，增加worker1/2/4/8及两个skew smoke；旧冻结binary不接收新参数。runner只在配置明确出现新key时传递，保持M2/M3归档的checksum replay可用。开发代表点、buffer差异及正式门禁见 [M4 milestone](milestones/M4.md)。
+
+## M5 停车机制对照
+
+使用 `bench-eventcount` 构建候选，以相同源码、MPMC/work-stealing/CV 构建 control。除停车和相应退避外，worker/producer、buffer、payload、采样和到达率保持一致。每组至少5个独立进程、2s warmup、10s测量；shutdown/drain 仍用有限存量窗口。macOS 为 generic 开发数据，不能代表 futex/物理 Linux。
+
+`bench_notify_scan --arrival-rate N` 复用实际池稀疏提交，输出 epoch、扫描总槽数、backend wake/return、注册数和 submit→body-end 的分组直方图。它不强制恰有0/1/N个注册者，也不隔离每个 RMW 的成本；读数是完整池的合计。比较 wakes 时注意 `wake_count_scope`：CV为notify请求，EventCount为成功标记后的backend调用。Linux才有实际wake_threads及wait_syscalls/EAGAIN/EINTR；generic输出NA。
+
+M5关闭期持续探测，必须同时报告shutdown/drain/join的wall、process CPU和task CPU；不能以sleep wall当有效CPU。回归/修复后的机制对照不得覆盖旧binary或原始失败。当前修复、开发测量和原生门禁见 [M5 milestone](milestones/M5.md)。

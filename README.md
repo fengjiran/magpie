@@ -1,6 +1,6 @@
 # magpie
 
-magpie 是一个面向 C++20 的固定 worker 工作窃取线程池。当前交付的是 M1 mutex 正确性底座：固定 worker、全局有界队列、拒绝策略、future、关闭与排空语义已实现。M3 已提供可选 MPMC + condition_variable 候选（默认仍为 mutex）；Chase-Lev 和 EventCount 尚未接入；当前版本不提供工作窃取快路径。
+magpie 是一个面向 C++20 的固定 worker 工作窃取线程池。默认采用 mutex/global/CV 正确性底座；M3 提供可选 MPMC，M4 提供可选 bounded Chase-Lev 工作窃取，M5 提供可选 EventCount 和退避。公共提交、拒绝、future、关闭与排空语义已实现；各平台和里程碑的验收状态以对应记录为准。
 
 ## 开发构建
 
@@ -58,3 +58,7 @@ macOS 数据只供开发；M2 完整矩阵与正式冻结仍待固定物理 Linu
 许可证为 Apache-2.0，见 [`LICENSE`](LICENSE)。项目不承诺跨版本 ABI/符号兼容；发布说明将明确变更范围。
 
 M3 的原语 API、候选构建和 weak try/关闭边界见 [docs/mpmc-queue.md](docs/mpmc-queue.md)，实际门禁状态见 [M3 milestone](docs/milestones/M3.md)。
+
+M4 的容量、owner TLS、单元素窃取与 fallback 见 [工作窃取说明](docs/work-stealing.md)，构建可选 `release-workstealing` 等 presets；实际验证和未关闭门禁见 [M4 milestone](docs/milestones/M4.md)。
+
+M5 的每 worker WaitSlot、generic/futex、退避、关闭期 CPU 与统计口径见 [EventCount 说明](docs/event-count.md)，可选 `release-eventcount` 等 presets。Linux 原生验收保留待完成，见 [M5 milestone](docs/milestones/M5.md)。

@@ -1,9 +1,11 @@
 # magpie 实施步骤与里程碑
 
 - 日期：2026-10-03。
-- 状态：**M0 待 Linux CI；M1 mutex 底座已通过本机验证、待平台/测试收口；M2 工程与本机开发冻结/同日重跑已完成、待物理 Linux 完整验收；M3 原语/池候选及本机开发验证/对照已完成、正式门禁待关闭；M4–M7 未开始**。
+- 状态：**M0 待 Linux CI；M1 mutex 底座已通过本机验证、待平台/测试收口；M2 工程与本机开发冻结/同日重跑已完成、待物理 Linux 完整验收；M3/M4 候选及本机验证已完成、正式门禁待关闭；M5 EventCount 候选已实现，审核修复与证据见 M5 记录，Linux 原生待验收；M6–M7 未开始**。
 - 范围：实施当前审核修订版线程池，形成正确性证据、冻结基线和首版交付。M1 尚无 Linux pthread backend 原生验收；完整证据见 [M1 milestone](../docs/milestones/M1.md)。
 - 上位约束：[主设计](magpie设计方案.md)、[逐项修复对照](review-fixes-2026-10-03.md)、[测试计划](test-plan.md)、[benchmark 计划](benchmark-plan.md)。
+
+2026-10-04：M1–M3 审核中的 async ownership/type-contract 和 smoke 资格问题已修复；修复后 mutex 开发冻结与同日 replay 已完成，证据见 [审核修复记录](../docs/milestones/M1-M3-review-fixes.md)。旧冻结及性能数据作为历史证据保留，正式平台门禁仍待关闭。
 
 ## 1. 实施目标与顺序
 
@@ -143,6 +145,8 @@ flowchart LR
 
 ## 7. M4：本地 deque、工作窃取和池层 fallback
 
+当前进度（2026-10-04）：单元素 deque、完整 owner 路径、受限批接收/窃取、CV 最后扫描及 opt-in presets 已实施，默认仍 mutex/global。R1/R2、容量/重入/跨池、百万ID、历史 oracle 与 RC11投影的实际状态见 [M4 milestone](../docs/milestones/M4.md)；Linux/ARM64及正式性能门禁未关闭。
+
 **目标：**接入审核修订后的单元素协议，恢复本地调度能力。
 
 实施步骤：
@@ -167,6 +171,8 @@ flowchart LR
 交付：单项 deque、完整 owner 快路径、工作窃取版和偏斜报告。旧批量 CAS 的证明与实现不得复用。
 
 ## 8. M5：每 worker WaitSlot EventCount 与三级退避
+
+当前状态（2026-10-04）：generic/futex 源码、候选接入、正式用例和有界 RC11 投影已交付；批领取保留一个执行项，避免全批反复迁移。用户确认暂无 Linux 执行环境，原生门禁保留待验收。本机修复、回归、开发对照与剩余项见 [M5 milestone](../docs/milestones/M5.md)。
 
 **目标：**使 Linux/generic 后端在真实池中满足注册、通知和关闭握手。
 

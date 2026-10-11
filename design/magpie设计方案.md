@@ -1,13 +1,13 @@
 # magpie 设计方案
 
-> 修订：2026-10-03，审核修复版本。状态：**设计已修订；M1 mutex 正确性底座已在 macOS 本机实现和验证，Linux worker backend 尚待 CI/原生验证**。
+> 修订：2026-10-04，M5 审核修复。状态：**默认 mutex/global/CV；M3–M5 候选和本机验证已交付，Linux 原生及正式性能门禁待验收**。
 > [审核报告](review-2026-10-03.md) 保留旧版反例；[修复对照](review-fixes-2026-10-03.md) 记录逐项处置。旧版批量 CAS、overflow 与共享 futex 字协议全部撤回。
 
 ## 1. 文档目的与约束
 
 本文件定义项目定位、组件职责、公开 API、关键原语骨架、所有权、关闭协议和验收。三个 ADR 补充协议依据；test-plan/benchmark-plan 分别定义正确性与性能证据。主设计与 ADR 冲突时先修正文档，不靠实现自行选择口径。
 
-当前实现是固定 worker + 全局有界 mutex ring 的 M1 基线，使用 condition_variable 停车。M3 已新增可选全局 MPMC + condition_variable 候选（默认仍 mutex），还没有 Chase-Lev 或 EventCount；下文涉及这些原语的代码段仍是设计骨架。GenMC atomic/fence capability probe 不能替代项目原语模型、Linux pthread 原生验证、Linux futex、ARM64 或性能验收。
+当前实现是固定 worker + 全局有界 mutex ring 的 M1 基线，使用 condition_variable 停车。M3 已新增可选全局 MPMC + condition_variable 候选（默认仍 mutex），M4 已新增可选 MPMC + bounded Chase-Lev + condition_variable 工作窃取候选，M5 已新增 EventCount/generic/futex 与退避候选。下文代码段仍是设计骨架，真实实现/验证见各 milestone。GenMC atomic/fence capability probe 不能替代项目原语模型、Linux pthread 原生验证、Linux futex、ARM64 或性能验收。
 
 M2 已新增 opt-in benchmark harness、独立源码快照与基线重跑入口，未改变上述生产协议。
 测量边界与不适用维度见 [benchmark 使用说明](../docs/benchmarks.md)，实际验收状态见 [M2 milestone](../docs/milestones/M2.md)。
@@ -51,6 +51,8 @@ magpie 是固定 worker 数的通用 C++20 工作窃取线程池，主要服务 
 
 **M1 当前实现边界：**调度只经过固定容量的全局 mutex ring，worker 按 FIFO 取任务；owner TLS 仅用于识别 worker 内满队列提交，并强制 inline fallback。M1 不创建本地 deque、MPMC queue 或 EventCount。worker 等待谓词由 queue mutex 保护的 condition_variable 握手；关闭中 worker 仍可停车等待 pending/gate 归零，不采用 M5 的每 worker WaitSlot/EventCount 注册协议。`DiscardOldest` 在同一个 queue mutex 临界区删除当前可取得的全局头并发布新任务；被移除 Task 在解锁并通知后销毁，因此其 capture destructor 不在队列锁内运行。该 mutex 基线避免 MPMC 中的 reservation retry 窗口，之后替换队列时仍须保留公共所有权和计数协议。
 
+**当前候选边界：**M4 使用 local→global bulk→随机单 victim 重复单项 steal，最后持 CV mutex 完整扫描再等待。M5 显式选择 EventCount，使用每 worker WaitSlot、64 次 cpu_relax 和 8 次 yield 后注册/完整扫描；Linux futex 和 generic 两个后端已实现，原生 Linux 门禁待验收。默认仍为 mutex/global/CV。见 [工作窃取说明](../docs/work-stealing.md) 和 [EventCount 说明](../docs/event-count.md)。
+
 旧 spill_lowest_half、overflow 缓冲、take_overflow、drain_spill_overflow 已删除。固定容量约束由 try_push 返回值表达，没有半批认领后的暂存或失败分区循环。
 
 ## 5. 运行机制
@@ -65,9 +67,9 @@ magpie 是固定 worker 数的通用 C++20 工作窃取线程池，主要服务 
 
 全局取批仅发生在 owner 的 pop 已返回 nullptr 后。本地没有其他生产者，此时 owner 暂停用户代码，接收量最多 min(BULK_LIMIT, local_capacity)。窃取接收上限 min(STEAL_CAP, local_capacity)，也只在本地空时调用。
 
-批内指针逆序 try_push 保持无窃取/重入交错时的批内 FIFO 执行序。try_push 此时应成功；release 也启用内部 require_invariant（违约记录后 terminate），不能静默丢弃失败项或依赖 debug assert。
+每个非空批次先保留 batch[0] 作为当前 worker 的独占执行项，不再发布该指针；其余指针逆序 try_push。这样每次成功领取都获得一个不会再次被 thief 取走的执行项，避免两个 worker 反复转移整批而不执行。无其他 thief 时保留原有批内 FIFO 执行序。try_push 此时应成功；release 也启用内部 require_invariant（违约记录后 terminate），不能静默丢弃失败项或依赖 debug assert。
 
-通知不负责所有权。外部批量入队仍逐次通知；池层把已认领批转入本地后可补一次通知以激活其他 thief。全池执行序不承诺 FIFO。
+通知不负责所有权。外部批量入队仍逐次通知；批内有剩余项发布到本地时必须补一次通知，且先注销当前注册，再通知和执行保留项。单项批次直接返回保留项，没有本地重新发布，无需迁移通知。全池执行序不承诺 FIFO。
 
 ### 5.3 worker 骨架
 
@@ -106,7 +108,7 @@ Task* ThreadPool::block_on_eventcount(WorkerCtx& ctx) {
 }
 ~~~
 
-spin/yield 只探测本地/全局，探测成功返回 Task*。acquire_ready 从全局取得批或从 victim 逐项窃取后先完成本地转移再 pop 一项。关停期注册后 stopping 检查总会返回，不会重新阻塞；不再依赖有窗口的单次前置检查。
+spin/yield 只探测本地/全局，探测成功返回 Task*。acquire_ready 从全局或 victim 取得非空批次后保留一项、完成剩余项发布并返回保留项。上面骨架展示注册/停止顺序，省略 migrated 标志的传播：生产实现必须在注销后、run_one 前补发剩余项通知。关停期不重新阻塞，保留注册后的 stopping 检查防止晚注册睡过最终通知。
 
 shutdown 后有存量长任务时，其他 worker 暂时忙等。W2.8 以 bench_shutdown_drain 浪费 CPU 数据决定是否增加最终完成通知及关停期停车协议；新协议须重新证明 join 活性。
 
@@ -138,6 +140,28 @@ concept TaskCallable =
     std::constructible_from<std::decay_t<F>, F&&> &&
     std::invocable<std::decay_t<F>&> &&
     std::is_nothrow_destructible_v<std::decay_t<F>>;
+
+namespace detail {
+template<class F>
+class AsyncTask final : public Task {
+public:
+    using Result = std::invoke_result_t<F&>;
+    template<class G>
+        requires std::constructible_from<F, G&&>
+    explicit AsyncTask(G&& f)
+        : callable_(std::forward<G>(f)),
+          packaged_([this]() -> Result { return std::invoke(callable_); }) {}
+    AsyncTask(const AsyncTask&) = delete;
+    AsyncTask& operator=(const AsyncTask&) = delete;
+    AsyncTask(AsyncTask&&) = delete;
+    AsyncTask& operator=(AsyncTask&&) = delete;
+    std::future<Result> get_future() { return packaged_.get_future(); }
+    void run() override { packaged_(); }
+private:
+    F callable_;
+    std::packaged_task<Result()> packaged_;
+};
+}
 
 enum class RejectionPolicy { CallerRuns, Abort, DiscardOldest };
 enum class QueueFullReason { QueueFull, ShuttingDown };
@@ -185,10 +209,9 @@ public:
     template<TaskCallable F>
     auto submit_async(F&& f)
         -> std::future<std::invoke_result_t<std::decay_t<F>&>> {
-        using R = std::invoke_result_t<std::decay_t<F>&>;
-        std::packaged_task<R()> pt(std::forward<F>(f));
-        auto fut = pt.get_future();
-        submit_task(new TaskImpl<std::packaged_task<R()>>(std::move(pt)));
+        auto task = std::make_unique<detail::AsyncTask<std::decay_t<F>>>(std::forward<F>(f));
+        auto fut = task->get_future();
+        submit_task(task.release());
         return fut;
     }
 
@@ -210,7 +233,9 @@ private:
 };
 ~~~
 
-头模板只构造 callable/packaged_task、抽取 future、移交非模板入口。new/构造失败时还未入提交门、未改 pending。future callable 异常由 packaged_task 保存；不再设计无法重新访问 packaged_task 共享状态的 has_future/deliver_exception 兜底。
+头模板只构造 Task、抽取 future、移交非模板入口。AsyncTask 直接拥有 F，地址稳定且不可复制/移动；packaged_task 的 callback 只借用该 Task，不拥有 F。F 从提交参数构造一次，不要求额外移动能力；CopyOnly lvalue 可用，构造异常在进入提交门和修改 pending 前传播。unique_ptr 托管到非模板入口接管为止。
+
+future 共享状态可以比 Task 活得更久，但不能延长 F 的 lifetime。正常执行、丢弃和拒绝时，F 随 Task 在 ExecutionScope 中销毁，完成后才递减已预留 pending。返回结果本身的 lifetime 仍由 future/调用方管理。future callable 异常和 broken_promise 继续由 packaged_task 保存；不新增 has_future/deliver_exception 兜底。packaged_task 比 F 先销毁，未运行的任务先放弃共享状态，再销毁 F；future ready 仍不代表 capture 销毁完成。
 
 ### 6.3 提交语义
 
@@ -453,7 +478,7 @@ bulk 是循环单元素出队，每项独立 CAS；不新增段认领协议。FI
 
 #### 7.2.4 通知
 
-每次新任务成功发布后无条件 notify_one。池层批转移完成后补一次通知。没有近似 depth 抑制；没有注册者仍执行 epoch SC RMW。
+每次新任务成功发布后无条件 notify_one。池层批次的剩余项发布后补一次通知；只保留执行项的单项批次没有重新发布。没有近似 depth 抑制；没有注册者的通知仍执行 epoch SC RMW。
 
 ### 7.3 EventCount
 
@@ -481,12 +506,12 @@ public:
     void enter(std::size_t i) noexcept {
         require_invariant(i < count_);
         require_invariant(slots_[i].word.load(std::memory_order_seq_cst) == Idle);
-        waiters_.fetch_add(1, std::memory_order_seq_cst);
+        require_invariant(waiters_.fetch_add(1, std::memory_order_seq_cst) < count_);
         slots_[i].word.store(Waiting, std::memory_order_seq_cst);
     }
     void leave(std::size_t i) noexcept {
-        slots_[i].word.store(Idle, std::memory_order_seq_cst);
-        waiters_.fetch_sub(1, std::memory_order_seq_cst);
+        require_invariant(slots_[i].word.exchange(Idle, std::memory_order_seq_cst) != Idle);
+        require_invariant(waiters_.fetch_sub(1, std::memory_order_seq_cst) != 0);
     }
     void wait_registered(std::size_t i, std::uint64_t key) noexcept {
         if (epoch_.load(std::memory_order_seq_cst) == key)
@@ -536,7 +561,7 @@ generic 每槽有自己的 mutex/cv。backend_signal 持该 mutex 执行同一 C
 
 W2 注册先于最后 stop/任务探测；W5 epoch 复查先于阻塞。通知无条件推进 epoch，再选择 Waiting 槽并标记 Signaled。等待者不回写共享字，其他 worker 无法改变本 worker 的状态。
 
-stop 若在注册后的检查之前则被检查拦截；若在之后，epoch 变化或 notify_all 的 Signaled 状态阻止晚睡。详细 SC 顺序、闸门与注销/重新注册边界见 ADR-002。仍需实现与模型检查，不以“全部 SC”冒充完整证明。
+stop 若在注册后的检查之前则被检查拦截；若在之后，epoch 变化或 notify_all 的 Signaled 状态阻止晚睡。详细 SC 顺序、闸门与注销/重新注册边界见 ADR-002。当前 generic 回归及有限 RC11 投影已运行，Linux 原生及完整池活性不由原语模型证明；实际证据见 M5 里程碑。
 
 #### 7.3.4 成本与移植
 
@@ -594,7 +619,7 @@ ExecutionFrame 链随 RAII 压入/恢复，所有嵌套帧都参与 require_exte
 2. 自旋/yield 等 in_flight_submitters.load(SC)==0；等待包括已过门 CallerRuns。
 3. evc.notify_all()。
 
-以上是目标 EventCount 协议。M1 mutex 变体在同一个 queue mutex 下写入 worker stopping 谓词并通知 queue condition_variable；worker 仅在 stopping、提交门为零、pending 为零同时成立时退出。stopping 时 Gate 的 1→0 与 pending 的 1→0 也在持 queue mutex 时广播；正常运行期间这两个归零转换不广播，任务发布仍只通知一个 worker。该变体允许关闭期停车，不等同于 EventCount 的注册/唤醒握手。M3 MPMC 候选保留该停车协议：worker 常态先无停车锁 dequeue，失败后持锁再次 dequeue/退出裁决；producer seq 发布后取得同一 mutex 再通知，确保 reservation-hole 恢复不会落入探测到 wait 的丢唤醒窗口。
+以上是目标 EventCount 协议。M1 mutex 变体在同一个 queue mutex 下写入 worker stopping 谓词并通知 queue condition_variable；worker 仅在 stopping、提交门为零、pending 为零同时成立时退出。stopping 时 Gate 的 1→0 与 pending 的 1→0 也在持 queue mutex 时广播；正常运行期间这两个归零转换不广播，任务发布仍只通知一个 worker。该变体允许关闭期停车，不等同于 EventCount 的注册/唤醒握手。M3/M4 MPMC 候选保留该停车协议：worker 常态先无停车锁 dequeue，失败后持锁再次 dequeue/退出裁决；producer seq 发布后取得同一 mutex 再通知，确保 reservation-hole 恢复不会落入探测到 wait 的丢唤醒窗口。
 
 允许多个外部线程调用，重复通知无害。停止后所有 submit 都被拒，包含已有任务再提交子项。任务须自行处理 ShuttingDown。已接受任务仍执行完。
 
@@ -665,7 +690,7 @@ deque push bottom release；普通 pop bottom 减量按完整协议裁决；最�
 - 池级：提交/拒绝/future、嵌套控制禁令、关闭/排空、构造回滚及配置。
 - 工具：release、TSan、ASan+UBSan；完整清单唯一来源 [test-plan](test-plan.md) §6。
 - 平台：generic 同套测试为补充，原生 Linux 单独运行真实 futex；ARM64 是内存序放宽的附加必要证据。
-- M1 mutex pool 已在 macOS 本机 Release、TSan、ASan+UBSan fast 和 Release 1M ID stress 运行；结果与 Linux/backend 未验收项见 [M1 milestone](../docs/milestones/M1.md)。deque、MPMC、EventCount 正式门禁仍待对应里程碑执行。design/validation 的辅助检查只验证记录的骨架和有限交错。
+- M1 mutex pool 已在 macOS 本机 Release、TSan、ASan+UBSan fast 和 Release 1M ID stress 运行；结果与 Linux/backend 未验收项见 [M1 milestone](../docs/milestones/M1.md)。M3/M4 的原语与池候选本机验证见 [M3 milestone](../docs/milestones/M3.md)、[M4 milestone](../docs/milestones/M4.md)，其正式平台门禁仍待关闭；EventCount 及池层推进修复见 [M5 milestone](../docs/milestones/M5.md)。design/validation 的辅助检查只验证记录的骨架和有限交错。
 
 ## 11. 拒绝策略与背压
 
@@ -844,7 +869,7 @@ W1：mutex 基线先落实 API/所有权/执行上下文/提交门/pending/关�
 
 ## 18. 文档状态
 
-- [ADR-001](chase-lev-deque-adr.md)：v2.0，单项协议与池层 fallback，待实现验证。
+- [ADR-001](chase-lev-deque-adr.md)：v2.1，单项协议与池层 fallback，M4 候选已实现、正式门禁待关闭。
 - [ADR-002](event-count-adr.md)：v3.0，每 worker 停车字与注册后 stop，待实现与模型检查。
 - [ADR-003](mpmc-queue-adr.md)：v2.0，载荷类型/弱 try 契约/进度边界，待实现验证。
 - [test-plan](test-plan.md)：正式用例名称、M1 已执行测试及后续原语门禁。

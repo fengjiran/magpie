@@ -7,6 +7,7 @@
 #include "magpie/export.hpp"
 
 #include <cstddef>
+#include <cstdint>
 
 namespace magpie::detail {
 
@@ -22,6 +23,22 @@ enum class PoolTestHookPoint {
     MpmcDequeueClaim,
     MpmcPublished,
     MpmcRejectBeforeRollback,
+    LocalPublished,
+    LocalFull,
+    BeforeVictimProbe,
+    DequeStealBeforeCas,
+    DequePopLastBeforeCas,
+    BatchTransferred,
+    BeforeFullScan,
+    BeforeEventPrepare,
+    AfterEventStopCheck,
+    EventWaiterIncrement,
+    EventRegistered,
+    EventBeforeBackendWait,
+    EventBeforeKernelWait,
+    EventSignalBeforeWake,
+    EventAfterLeave,
+    EventAfterBackendReturn,
 };
 
 struct PoolTestHooks {
@@ -32,6 +49,7 @@ struct PoolTestHooks {
     struct Snapshot {
         bool stopping;
         std::size_t gate, pending, enqueue_position, dequeue_position;
+        std::uint64_t epoch = 0, registered_waiters = 0;
     };
     void (*on_snapshot)(const Snapshot& state, void* context) noexcept = nullptr;
 };

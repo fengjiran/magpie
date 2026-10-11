@@ -1,6 +1,6 @@
 # test-plan：单元、确定性交错与池级验证
 
-- 状态：**2026-10-03 审核修订版，正式实现与门禁待执行**。
+- 状态：**M1–M4适用本机测试已实施，Linux/ARM64正式门禁及M5等待协议仍待执行；实际证据见各milestone**。
 - 上位：[magpie设计方案.md](magpie设计方案.md) §10；ADR-001/002/003。
 - R1–R7 回归矩阵替代旧半批/overflow/共享字用例；旧反例保留在审核报告。
 
@@ -64,9 +64,14 @@ L1 随机守恒 + L2 确定性缝 + L3 小历史/弱内存有界模型。模型�
 | MPMC enqueue | position CAS后、seq发布前 | ProducerClaimStall |
 | MPMC dequeue | position CAS后、seq释放前 | ConsumerClaimStall / ConsumerReservationMakesSlotUnavailable |
 | pool MPMC publication | seq发布后、通知前 | ProducerHoleRecoveryNotifiesParkedWorker |
+| pool local publication/full | 本地操作已返回；发布后/转投前 | LocalOverflowTaskConservation / LocalFullForwardsOnlyIncomingTask |
+| pool receive | 保留执行项、发布剩余项完成后，执行前；参数为整批认领数 | BulkReceiveCapacityBound / GlobalBatchKeepsExecutionClaimDuringShutdown / StolenBatchKeepsExecutionClaimDuringShutdown |
+| pool victim scan | 全扫描开始（worker index）；每victim探测前 | FullScanCoversAllVictims（逐worker排除自身，检查完整mask） |
 | pool MPMC reject | 最终 unavailable 后、销毁/回退前 | RejectionRollbackZeroNotifiesWaitingDrainer |
 | block_on_eventcount | 可选前置stop检查后、prepare前 | ShutdownBeforeRegistration |
 | EventCount enter | waiters++后、Waiting写前 | ConcurrentNotifyRegistration |
+| EventCount registration/leave | Waiting 发布后 / Idle 与注册计数注销后 | FullFinalScanBeforeEveryPark |
+| pool global batch | 最后一项 MPMC claim 后、本地剩余项发布前 | BatchRemainderWakesParkedWorker |
 | registered stop | stop检查false后 | ShutdownAfterRegisteredCheck |
 | EventCount wait | epoch复查后、backend_wait前 | WakeBeforeKernelWait / SeparateWaitWords |
 | backend_signal | CAS标记后、wake前 | WakeBeforeKernelWait / ConcurrentNotifyRegistration |
@@ -79,7 +84,7 @@ release 默认剔除。新增缝必须登记测试，不用于生产回调。旧
 
 ### 4.6 有界模型检查
 
-deque：2~3线程、容量4，完整双側 SC fence；关注普通pop、最后项、slot复用、失败候选。弱 try 不要求每次CAS失败都成功取项，但成功id必须正确。
+deque：M4 core 投影容量2、owner+1/2 thief；R1固定交错容量8。完整双側 SC fence；关注普通pop、最后项、slot复用、失败候选。弱 try 不要求每次CAS失败都成功取项，但成功id必须正确。
 
 EventCount：N=1/2/3，每worker最多一次注册，多个通知者，epoch/注册/Waiting/Signaled/Idle全协议；包含stop、复查后暂停、注销/重注册、EAGAIN/spurious、generic mutex与Linux比较等待各自模型。至少枚举两次注册生命周期，防旧notify落到新注册的盲区。有限 epoch 测试加入上限fail-fast，不用回绕等价简化而掩盖ABA。
 
@@ -95,26 +100,37 @@ T1 watchdog 默认10s，T2 120s，T3由外层job限制；可按工具链调整�
 
 | 文件 | 用例 |
 |---|---|
-| deque_test.cpp | PushPopSequential、TwoThreadPushSteal、LastElementRaceStress、StealAcrossOwnerPops、LastElementCasFailureRestoresBottom、StealFromFullDequeDeterministic、StealFromFullDequeStress、DifferentialRandomOps、LinearizabilitySmoke、DequeIndexLimit |
+| deque_test.cpp | PushPopSequential、TwoThreadPushSteal、StealAcrossOwnerPops、LastElementCasFailureRestoresBottom、StealFromFullDequeDeterministic、DifferentialRandomOps、LinearizabilitySmoke（100轮7操作、owner+2thief、real-time precedence、弱try）、SignedIndexBoundary |
+| deque_stress_test.cpp | LastElementRaceAndSlotReuse（1M唯一ID、owner+3thief、容量4） |
+| deque_death_test.cpp | DequeIndexLimit、NullTask（Release/ASan，TSan排除） |
+| pool_workstealing_test.cpp | LocalOverflowTaskConservation、LocalOverflowDefaultCapacity、BulkReceiveCapacityBound、LocalFullForwardsOnlyIncomingTask、CrossPoolSubmitAndShutdownRejectChild、FullScanCoversAllVictims、IdleThiefExecutesLocalChildren |
 | mpmc_queue_test.cpp | SingleThreadFifo、WrapAround、MultiProdMultiCons、ProducerClaimStall、ConsumerClaimStall、RelaxedQueueHistory、MpmcIndexLimit |
 | mpmc_queue_stress_test.cpp | MultiProdMultiCons（1M ID） |
 | mpmc_queue_death_test.cpp | MpmcIndexLimit、NullPointerPayload（Release/ASan，TSan排除） |
 | pool_mpmc_test.cpp | ProducerHoleRecoveryNotifiesParkedWorker、DiscardDoesNotSkipUnpublishedHead、ConsumerReservationMakesSlotUnavailable、DiscardRetryExhaustionRollsBackNewTask、RejectionRollbackZeroNotifiesWaitingDrainer、DiscardUnderLoad |
 | support/watchdog_probe.cpp / check_watchdog.py | 强制超时，精确状态marker和退出124，非fork/death，三个变体同测 |
-| event_count_test.cpp | SeparateWaitWords、WakeBeforeKernelWait、ShutdownBeforeRegistration、ShutdownAfterRegisteredCheck、ConcurrentNotifyRegistration、RegistrationBalanced、EpochLimit、SpuriousWake、GenericPredicateHandshake |
+| event_count_test.cpp | SeparateWaitWords、NotifyWithoutWaitersStillAdvancesEpoch、WakeBeforeKernelWait、ConcurrentNotifyRegistration、OldSignalCannotUndoNextRegistration、SpuriousReturnBalancesRegistration、RegistrationBalanced、GenericPredicateHandshake、GenericSpuriousWakeKeepsPredicate |
+| event_count_death_test.cpp | EpochLimit、RegistrationContract（Release/ASan，TSan 排除） |
+| event_count_linux_test.cpp | RealSignalInterruptsKernelWait、SpuriousWakeWithoutWordChange（Linux 原生） |
+| pool_event_count_test.cpp | ShutdownBeforeRegistration、ShutdownAfterRegisteredCheck、ShutdownAfterEpochRecheck、FinalScanUnregistersBeforeUserCode、SpawnWhileIdleWakeup、DrainDuringShutdown、FullFinalScanBeforeEveryPark、GlobalBatchKeepsExecutionClaimDuringShutdown、StolenBatchKeepsExecutionClaimDuringShutdown、BatchRemainderWakesParkedWorker |
 | pool_test.cpp | SubmitAndDrain、StatsQuiescentIdentity、FutureException、ExceptionHandlerCannotSynchronouslyControlItsPool、PoolOwnedHandlerCaptureDestructorHasExecutionGuard、RejectionPoliciesCallerRuns、RejectionRollbackNotifies、DiscardedFutureBrokenPromise、SubmitAfterShutdownReportsReason、ShutdownGateRace、DrainNotifyRace、CallerRunsControlGuard、WorkerControlGuard、WorkerSubmitsChild、WorkerFullQueueFallsBackToCallerRunsUnderAbortPolicy、CapturedDestructorControlGuard、ExecutedCaptureDestructorRunsInsideExecutionFrame、NestedExecutionControlGuard、ConstructorFailureRollback、ConstructorFailureDestroysPoolOwnedHandlerUnderGuard、OptionsValidation |
 | pool_death_test.cpp | DestructorControlGuardDeath |
-| pool_stress_test.cpp | ConcurrentProducersPreserveAcceptedTaskCount（1,000,000 个 task id 逐项校验恰执行一次） |
+| pool_stress_test.cpp | ConcurrentProducersPreserveAcceptedTaskCount（1,000,000 个 task id 逐项校验恰执行一次）；M4 WorkerSpawnConservesUniqueIds（64 root ×16384 child） |
 | api_compile_test.cpp | `TaskCallable` compile-time positive/negative assertions；AcceptsLvalueOnlyAndMoveOnlyCallables |
+| consumer/async_contract.cpp | 独立生产 consumer：保留 shared_future 至池销毁后、正常/异常/丢弃 retirement、CallerRuns/Abort capture guard、pending-before-destruction、CopyOnly lvalue、只移动一次的 throwing-move、构造异常计数回退、void/reference/move-only results；10s watchdog，适用 libc++/libstdc++，无需 GTest ABI |
 | bench/harness_test.cpp、bench/test_runner.py | M2 opt-in：直方图边界/overflow、保守 quantile、完成样本分组、静止计数失败、独立进程统计、配置身份、损坏归档拒绝与禁止覆盖 |
 
-M3 的 MPMC 原语及池候选用例已实现；deque/EventCount 仍对应后续里程碑。提交门/DrainNotifyRace/部分构造失败交错在测试 preset 的独立 `magpie_test_support` 中启用；production `magpie` 不编译测试 hooks。DeathTest 独立进程运行，TSan 构建不生成或运行该 suite。
+M3/M4/M5 原语与候选用例已实现；平台通过范围以各 milestone 的实际证据为准。提交门/DrainNotifyRace/部分构造失败交错在独立 `magpie_test_support` 中启用；production `magpie` 不编译测试 hooks。DeathTest 独立进程运行，TSan 不构建该 suite。
+
+M5 任务推进回归在批处理返回前暂停领取者，关闭后让另一 worker 完成窃取探测，验证独占执行项没有再次被认领；分别覆盖 global 和 victim 来源。剩余项通知回归强制“全局票据已认领、本地尚未发布→另一 worker 最后探测/注册→迁移发布”，在领取者执行项被外部 latch 占用时要求其余任务完成。全批再发布和遗漏剩余项通知的临时变异必须被拒绝；负例只存在验证归档，不进入生产。
 
 R1/R2必须精确强制审核反例顺序。R3/R4在本地容量16/1024、全局滿、有限子任务递归下验证旧项仍保留、新项执行和pending守恒，不再依赖overflow缓冲。
 
 R5：A通过W5后暂停，通知标记A，B恢复注册；B不能改A的word，放行A后比较失败。R6两侧：shutdown在prepare前已完成、或发生在注册stop检查后；均不得晚睡。
 
 R7：外部CallerRuns、worker局部满fallback、异常回调、capture析构、跨池嵌套回到较早执行帧，分别验证guard。捕获析构中调用控制API的测试应捕获logic_error；throw逃出noexcept destructor按既定语言规则terminate。
+
+async capture 的 retirement 必须在仍保留 future/shared_future 时检查，不能先 get/reset future 再检查，否则会掩盖标准库延迟销毁 callable 的差异。`bench/test_runner.py` 的 replay 回归使用冻结长窗口配置验证显式 smoke 永不获得正式资格，并拒绝旧版本错误标记 eligible 的 smoke 初始归档；mock 环境只验证分类逻辑，不作为 Linux 或性能证据。
 
 构造回滚在至少一个worker已停车后强制下一次创建失败；通知并join后重抛原异常。所有victim已构造的阶段约束须白盒验证。
 
@@ -138,6 +154,8 @@ W2.7内存序放宽要求ARM64物理机或云机实测，并保留工具链/日�
 
 ## 10. 门禁
 
-工作项对应正式用例×工具变体全绿、模型输入/结果归档，才可关闭。M0 已有 build-info/静态共享 consumer 基础用例，GenMC atomic/fence capability probe 也已归档；这不覆盖 ThreadPool 协议。M1 已有真实池 fast/stress 用例与本机结果，Linux 平台、拒绝回退归零通知的精确交错和超时状态 dump 仍待收口；W2 原语用例未实现。M2 benchmark smoke 检查 harness，不证明池协议或性能。benchmark 门槛、Linux、ARM64 或 soak 缺证据必须明确列为待验证，不以文档变更冒充完成。
+工作项对应正式用例×工具变体全绿、模型输入/结果归档，才可关闭。M0 已有 build-info/静态共享 consumer 基础用例，GenMC atomic/fence capability probe 也已归档；这不覆盖 ThreadPool 协议。M1 已有真实池 fast/stress 用例与本机结果，Linux 平台、拒绝回退归零通知的精确交错和超时状态 dump 仍待收口；M3/M4/M5 原语用例已建立，实际通过范围见各里程碑。M2 benchmark smoke 检查 harness，不证明池协议或性能。benchmark 门槛、Linux、ARM64 或 soak 缺证据必须明确列为待验证，不以文档变更冒充完成。
 
 M3 的 success oracle 同时校核所有 id 恰一次和 producer/consumer claim position→id 配对；false unavailable 不套严格 FIFO 空/满规格。新用例 watchdog 读取 atomics/最后 hook snapshot，原生全线程堆栈 dump 仍待平台补齐；快照不是同时刻不变量 oracle。详见 [M3 milestone](../docs/milestones/M3.md)。
+
+M4 测试钩子从生产库剔除；non-template deque 的 hook-enabled 测试不链接另一个生产 deque 定义，避免类布局 ODR 冲突。上限初始化仅在测试中、quiescent边界执行；生产索引不重置。完整stack dump及Linux native仍未覆盖，watchdog提供独立atomic近似状态后退出124。实际结果见 [M4 milestone](../docs/milestones/M4.md)。

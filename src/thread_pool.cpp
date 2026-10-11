@@ -1,6 +1,10 @@
 #include "magpie/thread_pool.hpp"
 
 #include "worker_thread.hpp"
+#if defined(MAGPIE_USE_EVENT_COUNT)
+#include "event_count.hpp"
+#include "spin_wait.hpp"
+#endif
 
 #if defined(MAGPIE_USE_MPMC)
 #include "magpie/mpmc_queue.hpp"
@@ -11,6 +15,10 @@
 #endif
 
 #include <algorithm>
+#include <array>
+#if defined(MAGPIE_USE_WORK_STEALING)
+#include "magpie/chase_lev_deque.hpp"
+#endif
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -36,6 +44,22 @@ enum class HookPoint {
     MpmcDequeueClaim,
     MpmcPublished,
     MpmcRejectBeforeRollback,
+    LocalPublished,
+    LocalFull,
+    BeforeVictimProbe,
+    DequeStealBeforeCas,
+    DequePopLastBeforeCas,
+    BatchTransferred,
+    BeforeFullScan,
+    BeforeEventPrepare,
+    AfterEventStopCheck,
+    EventWaiterIncrement,
+    EventRegistered,
+    EventBeforeBackendWait,
+    EventBeforeKernelWait,
+    EventSignalBeforeWake,
+    EventAfterLeave,
+    EventAfterBackendReturn,
 };
 #endif
 
@@ -176,10 +200,56 @@ struct ThreadPool::Impl {
 
     struct WorkerCtx {
         WorkerCtx(std::size_t worker_index, Impl* implementation)
-            : index(worker_index), owner(implementation) {}
+            : index(worker_index), owner(implementation)
+#if defined(MAGPIE_USE_WORK_STEALING)
+              ,
+              local(implementation->local_capacity
+#if defined(MAGPIE_ENABLE_TEST_HOOKS)
+                    ,
+                    &local_hooks
+#endif
+                    ),
+              random_state((worker_index + 1) * 0x9e3779b97f4a7c15ULL)
+#endif
+        {
+#if defined(MAGPIE_USE_WORK_STEALING)
+            victims.reserve(implementation->worker_total - 1);
+            for (std::size_t i = 0; i < implementation->worker_total; ++i) {
+                if (i != index) {
+                    victims.push_back(i);
+                }
+            }
+#endif
+        }
 
         std::size_t index;
         Impl* owner;
+#if defined(MAGPIE_USE_WORK_STEALING)
+#if defined(MAGPIE_ENABLE_TEST_HOOKS)
+        detail::DequeTestHooks local_hooks{
+            [](std::int64_t position, void* context) noexcept {
+                auto* ctx = static_cast<WorkerCtx*>(context);
+                ctx->owner->test_hook(HookPoint::DequeStealBeforeCas,
+                                      static_cast<std::size_t>(position));
+            },
+            [](std::int64_t position, void* context) noexcept {
+                auto* ctx = static_cast<WorkerCtx*>(context);
+                ctx->owner->test_hook(HookPoint::DequePopLastBeforeCas,
+                                      static_cast<std::size_t>(position));
+            },
+            this};
+#endif
+        ChaseLevDeque local;
+        std::array<Task*, 64> batch{};
+        std::vector<std::size_t> victims;
+        std::uint64_t random_state;
+        std::uint64_t random() noexcept {
+            random_state ^= random_state >> 12;
+            random_state ^= random_state << 25;
+            random_state ^= random_state >> 27;
+            return random_state * 2685821657736338717ULL;
+        }
+#endif
         detail::WorkerThread thread;
     };
 
@@ -208,17 +278,31 @@ struct ThreadPool::Impl {
             const auto positions = global_queue.positions_for_test();
             enq = positions[0]; deq = positions[1];
 #endif
-            hooks->on_snapshot({stopping.load(), in_flight_submitters.load(), pending.load(), enq, deq}, hooks->context);
+            std::uint64_t epoch = 0, registered = 0;
+#if defined(MAGPIE_USE_EVENT_COUNT)
+            const auto event = event_count.snapshot();
+            epoch = event.epoch; registered = event.registered;
+#endif
+            hooks->on_snapshot({stopping.load(), in_flight_submitters.load(), pending.load(), enq, deq, epoch, registered}, hooks->context);
         }
         invoke_test_hook(point, index);
     }
 #endif
 
+    static std::size_t checked_worker_count(std::size_t requested) {
+        const auto count = effective_worker_count(requested);
+        if (count > std::vector<std::unique_ptr<WorkerCtx>>{}.max_size() ||
+            count > std::numeric_limits<std::size_t>::max() / sizeof(WorkerCtx)) {
+            throw std::length_error("worker count exceeds platform allocation limits");
+        }
+        return count;
+    }
+
     explicit Impl(ThreadPool* pool_owner, const ThreadPoolOptions& source)
         : owner(pool_owner), options(copy_and_validate_options(source)),
           queue_capacity(normalize_capacity(options.global_queue_capacity, global_slot_size)),
-          local_capacity(normalize_capacity(options.local_deque_capacity, sizeof(Task*))),
-          worker_total(effective_worker_count(options.worker_count)),
+          local_capacity(normalize_capacity(options.local_deque_capacity, sizeof(std::atomic<Task*>))),
+          worker_total(checked_worker_count(options.worker_count)),
 #if defined(MAGPIE_USE_MPMC)
           global_queue(queue_capacity
 #if defined(MAGPIE_ENABLE_TEST_HOOKS)
@@ -228,13 +312,15 @@ struct ThreadPool::Impl {
 #else
           queue_slots(queue_capacity),
 #endif
+#if defined(MAGPIE_USE_EVENT_COUNT)
+          event_count(worker_total
+#if defined(MAGPIE_ENABLE_TEST_HOOKS)
+                      , &event_hooks
+#endif
+                      ),
+#endif
           handler(pool_owner, source.exception_handler) {
 
-        const auto worker_limit = std::vector<std::unique_ptr<WorkerCtx>>{}.max_size();
-        if (worker_total > worker_limit ||
-            worker_total > std::numeric_limits<std::size_t>::max() / sizeof(WorkerCtx)) {
-            throw std::length_error("worker count exceeds platform allocation limits");
-        }
 
         workers.reserve(worker_total);
         for (std::size_t i = 0; i < worker_total; ++i) {
@@ -353,10 +439,12 @@ struct ThreadPool::Impl {
             std::lock_guard<std::mutex> lock(drain_mutex);
             drain_cv.notify_all();
         }
+#if !defined(MAGPIE_USE_EVENT_COUNT)
         if (stopping.load(std::memory_order_seq_cst)) {
             std::lock_guard<std::mutex> lock(queue_mutex);
             notify_queue_all();
         }
+#endif
     }
 
     void submit(Task* task) {
@@ -371,6 +459,22 @@ struct ThreadPool::Impl {
         MAGPIE_TEST_HOOK(SubmitAfterGate, 0);
 
         add_pending();
+#if defined(MAGPIE_USE_WORK_STEALING)
+        if (is_worker_thread()) {
+            auto& context = *static_cast<WorkerCtx*>(current_owner_frame->worker);
+            if (context.local.try_push(task_owner.task)) {
+                task_owner.forget();
+                increment_saturated(submitted);
+                MAGPIE_TEST_HOOK(LocalPublished, context.index);
+                notify_local_ready();
+                return;
+            }
+            increment_saturated(local_spills);
+            MAGPIE_TEST_HOOK(LocalFull, context.index);
+            // Only the incoming task is forwarded. MPMC failure then takes
+            // the existing worker CallerRuns path, regardless of external policy.
+        }
+#endif
 #if defined(MAGPIE_USE_MPMC)
         submit_mpmc(task_owner);
 #else
@@ -441,9 +545,11 @@ struct ThreadPool::Impl {
         // field; do not read/return the published pointer after successful try.
         task_owner.forget();
         increment_saturated(submitted);
-        // The last probe and CV wait hold this same mutex. Publication precedes
-        // acquiring it, so a reservation-hole recovery cannot lose its wake.
+        // Publication precedes notification. CV retains its mutex handshake;
+        // EventCount advances epoch and signals independently registered slots.
+#if !defined(MAGPIE_USE_EVENT_COUNT)
         std::lock_guard<std::mutex> lock(queue_mutex);
+#endif
         notify_queue_one();
         return true;
     }
@@ -495,12 +601,12 @@ struct ThreadPool::Impl {
             std::fprintf(stderr, "magpie: submission gate underflow\n");
             std::terminate();
         }
-        if (old == 1) {
-            if (stopping.load(std::memory_order_seq_cst)) {
-                std::lock_guard<std::mutex> lock(queue_mutex);
-                notify_queue_all();
-            }
+#if !defined(MAGPIE_USE_EVENT_COUNT)
+        if (old == 1 && stopping.load(std::memory_order_seq_cst)) {
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            notify_queue_all();
         }
+#endif
     }
 
     struct GateGuard {
@@ -540,7 +646,9 @@ struct ThreadPool::Impl {
     }
 
     void publish_worker_stop() noexcept {
+#if !defined(MAGPIE_USE_EVENT_COUNT)
         std::lock_guard<std::mutex> lock(queue_mutex);
+#endif
         stopping.store(true, std::memory_order_seq_cst);
         notify_queue_all();
     }
@@ -571,11 +679,150 @@ struct ThreadPool::Impl {
         }
     }
 
+#if defined(MAGPIE_USE_WORK_STEALING)
+    void notify_local_ready() noexcept {
+#if !defined(MAGPIE_USE_EVENT_COUNT)
+        std::lock_guard<std::mutex> lock(queue_mutex);
+#endif
+        notify_queue_one();
+    }
+    Task* transfer_batch(WorkerCtx& context, std::size_t count, bool& migrated) noexcept {
+        // Keep one successful claim private: republishing every item lets two
+        // workers repeatedly steal the whole batch without executing anything.
+        auto* task = context.batch[0];
+        context.batch[0] = nullptr;
+        for (std::size_t i = count; i > 1; --i) {
+            if (!context.local.try_push(context.batch[i - 1])) {
+                std::fputs("magpie: deque batch capacity invariant\n", stderr);
+                std::terminate();
+            }
+            context.batch[i - 1] = nullptr;
+        }
+        migrated = migrated || count > 1;
+        MAGPIE_TEST_HOOK(BatchTransferred, count);
+        return task;
+    }
+    Task* steal_from(WorkerCtx& context, std::size_t victim, bool& migrated) noexcept {
+        MAGPIE_TEST_HOOK(BeforeVictimProbe, victim);
+        const auto limit = std::min(std::size_t{64}, local_capacity);
+        std::size_t count = 0;
+        while (count < limit) {
+            auto* task = workers[victim]->local.steal();
+            if (!task) {
+                break;
+            }
+            context.batch[count++] = task;
+            increment_saturated(stolen);
+        }
+        return count ? transfer_batch(context, count, migrated) : nullptr;
+    }
+    Task* acquire_ready(WorkerCtx& context, bool full_scan, bool& migrated, bool allow_steal = true) noexcept {
+        if (auto* task = context.local.pop()) {
+            return task;
+        }
+        const auto count = global_queue.dequeue_bulk(context.batch.data(),
+                                                     std::min(std::size_t{32}, local_capacity));
+        if (count) {
+            return transfer_batch(context, count, migrated);
+        }
+        if (!allow_steal || context.victims.empty()) {
+            return nullptr;
+        }
+        if (!full_scan) {
+            return steal_from(context, context.victims[context.random() % context.victims.size()],
+                              migrated);
+        }
+        MAGPIE_TEST_HOOK(BeforeFullScan, context.index);
+        // Fixed storage, shuffled permutation; the final scan probes every
+        // other worker even when the normal one-victim attempt was unlucky.
+        for (std::size_t n = context.victims.size(); n > 1; --n) {
+            std::swap(context.victims[n - 1], context.victims[context.random() % n]);
+        }
+        for (auto victim : context.victims) {
+            if (auto* task = steal_from(context, victim, migrated)) {
+                return task;
+            }
+        }
+        return nullptr;
+    }
+#endif
+
+#if defined(MAGPIE_USE_EVENT_COUNT)
+    void event_worker_loop(WorkerCtx& context) noexcept {
+        bool post_return = false;
+        for (;;) {
+            if (can_exit()) { return; }
+            bool migrated = false;
+            auto* task = acquire_ready(context, false, migrated);
+            if (post_return) {
+                increment_saturated(task ? post_wake_hit : post_wake_empty);
+                post_return = false;
+            }
+            for (unsigned spin = 0; !task && spin < 64; ++spin) {
+                detail::cpu_relax();
+                task = acquire_ready(context, false, migrated, false);
+            }
+            for (unsigned retry = 0; !task && retry < 8; ++retry) {
+                std::this_thread::yield();
+                task = acquire_ready(context, false, migrated, false);
+            }
+            if (!task) {
+                // A pre-registration stop check is only a hint. The second
+                // check after enter closes shutdown's late-registration race.
+                if (stopping.load(std::memory_order_seq_cst)) { continue; }
+                MAGPIE_TEST_HOOK(BeforeEventPrepare, context.index);
+                const auto key = event_count.prepare_wait();
+                event_count.enter(context.index);
+                if (stopping.load(std::memory_order_seq_cst)) {
+                    event_count.leave(context.index);
+                    continue;
+                }
+                MAGPIE_TEST_HOOK(AfterEventStopCheck, context.index);
+                task = acquire_ready(context, true, migrated);
+                increment_saturated(task ? pre_sleep_scan_hit : pre_sleep_scan_empty);
+                if (task) {
+                    event_count.leave(context.index);
+                } else {
+                    MAGPIE_TEST_HOOK(WorkerBeforeWait, context.index);
+                    post_return = event_count.wait_registered(context.index, key);
+                }
+            }
+            // Never notify (generic takes another slot's mutex) or run user
+            // code while retaining this worker's registration.
+            if (migrated) { notify_local_ready(); }
+            if (task) { run_one(task, true); }
+        }
+    }
+#endif
+
     void worker_loop(WorkerCtx& context) {
         OwnerScope owner_scope(owner, &context);
+#if defined(MAGPIE_USE_EVENT_COUNT)
+        event_worker_loop(context);
+#else
         for (;;) {
             Task* task = nullptr;
-#if defined(MAGPIE_USE_MPMC)
+#if defined(MAGPIE_USE_WORK_STEALING)
+            bool migrated = false;
+            task = acquire_ready(context, false, migrated);
+            if (!task) {
+                std::unique_lock<std::mutex> lock(queue_mutex);
+                for (;;) {
+                    task = acquire_ready(context, true, migrated);
+                    if (task || can_exit()) {
+                        break;
+                    }
+                    MAGPIE_TEST_HOOK(WorkerBeforeWait, context.index);
+                    queue_cv.wait(lock);
+                }
+                if (!task) {
+                    break;
+                }
+            }
+            if (migrated) {
+                notify_local_ready();
+            }
+#elif defined(MAGPIE_USE_MPMC)
             if (!global_queue.dequeue(task)) {
                 std::unique_lock<std::mutex> lock(queue_mutex);
                 for (;;) {
@@ -600,6 +847,7 @@ struct ThreadPool::Impl {
             // All queue operations and the parking mutex are finished first.
             run_one(task, true);
         }
+#endif
         MAGPIE_TEST_HOOK(WorkerExit, context.index);
     }
 
@@ -619,13 +867,21 @@ struct ThreadPool::Impl {
 #endif
 
     void notify_queue_one() noexcept {
+#if defined(MAGPIE_USE_EVENT_COUNT)
+        event_count.notify_one();
+#else
         queue_cv.notify_one();
         increment_saturated(wakes);
+#endif
     }
 
     void notify_queue_all() noexcept {
+#if defined(MAGPIE_USE_EVENT_COUNT)
+        event_count.notify_all();
+#else
         queue_cv.notify_all();
         increment_saturated(wakes);
+#endif
     }
 
 #if !defined(MAGPIE_USE_MPMC)
@@ -658,6 +914,28 @@ struct ThreadPool::Impl {
     static constexpr auto global_slot_size = sizeof(Task*);
     std::vector<Task*> queue_slots;
 #endif
+#if defined(MAGPIE_USE_EVENT_COUNT)
+#if defined(MAGPIE_ENABLE_TEST_HOOKS)
+    detail::EventCountTestHooks event_hooks{
+        [](detail::EventCountHookPoint point, std::size_t index, void* context) noexcept {
+            auto* impl = static_cast<Impl*>(context);
+            using P = detail::EventCountHookPoint;
+            switch (point) {
+            case P::AfterWaiterIncrement: impl->test_hook(HookPoint::EventWaiterIncrement, index); break;
+            case P::AfterRegistered: impl->test_hook(HookPoint::EventRegistered, index); break;
+            case P::BeforeBackendWait: impl->test_hook(HookPoint::EventBeforeBackendWait, index); break;
+            case P::BeforeKernelWait: impl->test_hook(HookPoint::EventBeforeKernelWait, index); break;
+            case P::AfterSignalBeforeWake: impl->test_hook(HookPoint::EventSignalBeforeWake, index); break;
+            case P::AfterLeave: impl->test_hook(HookPoint::EventAfterLeave, index); break;
+            case P::AfterBackendReturn: impl->test_hook(HookPoint::EventAfterBackendReturn, index); break;
+            case P::BeforeEpochCheck: break;
+            }
+        }, this};
+#endif
+    detail::EventCount event_count;
+    std::atomic<std::uint64_t> post_wake_hit{0}, post_wake_empty{0};
+    std::atomic<std::uint64_t> pre_sleep_scan_hit{0}, pre_sleep_scan_empty{0};
+#endif
     std::vector<std::unique_ptr<WorkerCtx>> workers;
 #if !defined(MAGPIE_USE_MPMC)
     std::size_t queue_head = 0;
@@ -678,6 +956,8 @@ struct ThreadPool::Impl {
     std::atomic<std::uint64_t> worker_completed{0};
     std::atomic<std::uint64_t> inline_completed{0};
     std::atomic<std::uint64_t> wakes{0};
+    std::atomic<std::uint64_t> stolen{0};
+    std::atomic<std::uint64_t> local_spills{0};
     HandlerHolder handler;
 };
 
@@ -750,6 +1030,27 @@ ThreadPool::Stats ThreadPool::stats() const noexcept {
     result.inline_completed = impl_->inline_completed.load(std::memory_order_relaxed);
     result.pending = impl_->pending.load(std::memory_order_relaxed);
     result.wakes = impl_->wakes.load(std::memory_order_relaxed);
+    result.stolen = impl_->stolen.load(std::memory_order_relaxed);
+    result.local_spills = impl_->local_spills.load(std::memory_order_relaxed);
+#if defined(MAGPIE_USE_EVENT_COUNT)
+    const auto event = impl_->event_count.snapshot();
+    result.wakes = event.wakes;
+    result.epoch = event.epoch;
+    result.registered_waiters = event.registered;
+    result.notify_scan_slots = event.scan_slots;
+    result.wait_calls = event.wait_calls;
+    result.wait_returns = event.wait_returns;
+#if MAGPIE_EVENTCOUNT_USE_FUTEX
+    result.wake_threads = event.wake_threads;
+    result.wait_syscalls = event.wait_syscalls;
+    result.wait_eagain = event.eagain;
+    result.wait_eintr = event.eintr;
+#endif
+    result.post_wake_hit = impl_->post_wake_hit.load();
+    result.post_wake_empty = impl_->post_wake_empty.load();
+    result.pre_sleep_scan_hit = impl_->pre_sleep_scan_hit.load();
+    result.pre_sleep_scan_empty = impl_->pre_sleep_scan_empty.load();
+#endif
     return result;
 }
 

@@ -22,6 +22,8 @@ struct Config {
     std::size_t workers = 1;
     std::size_t producers = 1;
     std::size_t capacity = 4096;
+    std::size_t local_capacity = 16;
+    std::string spawn_pattern = "uniform";
     double warmup = 2;
     double duration = 10;
     double arrival_rate = 0;
@@ -58,6 +60,8 @@ struct Histogram {
 
 struct Result {
     ThreadPool::Stats stats;
+    std::uint64_t root_tasks = 0;
+    std::uint64_t leaf_tasks = 0;
     bool has_pool_stats = false;
     double window_seconds = 0;
     double elapsed_seconds = 0;

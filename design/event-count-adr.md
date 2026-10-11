@@ -1,6 +1,6 @@
 # ADR-002：EventCount——每 worker 等待状态字与关闭握手
 
-- 状态：**已修订，待实现与模型检查（v3.0，2026-10-03）**。
+- 状态：**M5 候选已实现；generic 与有限 RC11 验证已运行，Linux 原生门禁待验收（v3.1，2026-10-04）**。实际记录见 [M5](../docs/milestones/M5.md)。
 - 上位约束：[magpie设计方案.md](magpie设计方案.md) §5.3、§7.3、§9。
 - 依据：[审核报告](review-2026-10-03.md) R5/R6。撤回 v2.x 共享睡眠字证明；generic 的额外 mutex 不能替 Linux 版作证。
 
@@ -32,7 +32,7 @@ W4 本地/全局/全 victim 最后探测；只认领，不执行用户代码
    命中 → leave；返回主循环后再执行
 W5 epoch.load(SC) != key → leave 并返回重扫
 W6 backend_wait(slot,Waiting)
-W7 word.store(Idle,SC)，waiters.fetch_sub(1,SC)
+W7 word.exchange(Idle,SC)，waiters.fetch_sub(1,SC)，检查配平
 
 N1 epoch.fetch_add(1,SC)（上限前 fail-fast；无条件、先于闸门）
 N2 notify_one 读 waiters(SC)，0 则返回
@@ -72,7 +72,9 @@ stop 在 W3 后：W5 若在 shutdown N1 后则 epoch 变化；否则该注册的
 
 uint64_t epoch 上限前 fail-fast，不允许回绕。word 仅有注册生命周期状态，不承载有限位 generation。
 
-以上是修订协议的书面依据，仍需模型检查注册/扫描/注销/重注册、多个并发 notify、stop 与 spurious。设计期不标记成已完成形式证明。
+以上是协议的书面依据；下述有界模型补充注册/扫描/注销/重注册、并发通知和关闭证据，不标记为完整形式证明。
+
+当前 C11 投影已覆盖 N=1/2/3、两轮注册、并发通知、抽象 compare/park/wake，以及 R5/R6 正反例。它不含真实 syscall 或整个调度器。M5 审核发现整批再发布的任务迁移循环，池层现改为保留一个执行项，只发布剩余项；线程继续调度、用户任务返回和发布完成仍是活性前提，原语唤醒正确不能代替任务推进。
 
 ## 5. 后端
 

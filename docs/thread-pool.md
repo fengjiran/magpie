@@ -1,6 +1,6 @@
 # ThreadPool
 
-`ThreadPool` 使用固定数量的 worker 和全局有界 FIFO mutex ring。当前 M1 版本建立公共语义基线；它还没有本地 deque、MPMC queue 或 EventCount，所以不会执行 work stealing。
+`ThreadPool` 默认使用固定数量的 worker 和全局有界 FIFO mutex ring。M1 建立公共语义基线，M3/M4 提供 MPMC 和 Chase-Lev 候选，M5 提供 EventCount 及退避候选。候选须显式构建选择，公共所有权与生命周期契约沿用基线。
 
 ```cpp
 #include <magpie/thread_pool.hpp>
@@ -18,9 +18,11 @@ int value = result.get();
 pool.shutdown();
 ```
 
-`worker_count == 0` 使用 `std::thread::hardware_concurrency()`，平台返回零时回退为 1。全局和预留本地容量都至少为 16，校验后向上取整到 2 的幂。M1 只为全局容量分配队列槽；`local_deque_capacity` 目前只校验，尚不影响调度。
+`worker_count == 0` 使用 `std::thread::hardware_concurrency()`，平台返回零时回退为 1。全局和预留本地容量都至少为 16，校验后向上取整到 2 的幂。M1 只为全局容量分配队列槽；`local_deque_capacity` 在默认全局构建中只校验，M4 候选按每 worker 实际分配槽。
 
 `submit_async` 返回 `std::future`，不保证任务一定由 worker 执行：CallerRuns 可能在它返回前完成 future。packaged callable 的异常保存在 future 中。`submit` 任务的异常交给 `exception_handler`；没有 handler 时写入 stderr。多个 worker 和外部 CallerRuns 提交者可以并发调用 handler，因此 handler 的可变捕获状态必须由调用方保证线程安全。池不会用回调锁串行用户 handler。
+
+异步 Task 直接拥有存储的 callable，并按 `F&` 调用；从提交参数构造一次，支持 CopyOnly lvalue 和 move-only rvalue。构造失败直接传播，尚未进入提交计数。保留 `future`/`shared_future` 不延长 callable 或其 capture 的 lifetime：正常执行、丢弃和拒绝时，它们在池的 ExecutionFrame 内随 Task 销毁，先于对应 pending 递减。future ready 可以早于 capture 销毁；返回结果本身及显式外部共享对象的 lifetime 由调用方管理。引用结果不延长被引用对象的 lifetime，不能返回指向 Task 自有 capture 的引用。
 
 外部 submit 遇到全局队列无可用槽时应用配置的拒绝策略：
 
@@ -41,3 +43,7 @@ M1 worker 用 `std::condition_variable` 停车。stopping 谓词在与等待相�
 测试 preset 构建单独的 `magpie_test_support` 静态库来驱动确定性交错。生产 `magpie` 目标不包含测试 hook 状态或符号。
 
 M3 可通过构建选项选择全局 MPMC 候选，默认仍 mutex。候选的 QueueFull 表示当前 slot 不可取得，可能存在 producer 未发布或 consumer 未释放窗口；DiscardOldest 不跳过未发布头，删除旧项后新项仍可能因竞争拒绝。控制/ownership/callback/future 契约继续适用，详情见 [MPMC 使用说明](mpmc-queue.md)。
+
+M4 opt-in 工作窃取候选已接入本地 deque，公共契约沿用此基线；owner 提交、容量与 CV 通知握手的差异见 [工作窃取说明](work-stealing.md)。默认构建仍为 mutex。
+
+M5 可在工作窃取候选上选择 EventCount。它使用独立 WaitSlot 和 epoch 通知，关闭期不重新停车，长任务期间其他 worker 可能忙等；统计不能把 backend 返回当作实际内核唤醒。配置、统计和原生验收边界见 [EventCount 说明](event-count.md)。

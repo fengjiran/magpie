@@ -5,8 +5,8 @@
 
 #include <algorithm>
 #include <cmath>
-#include <ctime>
 #include <cstdlib>
+#include <ctime>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -89,7 +89,9 @@ Config parse_config(int argc, char** argv) {
                "  --warmup SEC --duration SEC --arrival-rate TASKS_PER_SEC --seed N\n"
                "  --rejection abort|caller-runs --work N --sample-stride N --sample-capacity N\n"
                "  --worker-cpus ID,ID --producer-cpus ID,ID (Linux only)\n"
-               "  --depth N --fanout N --task-count N --sleep-ms N --config-id TEXT\n";
+               "  --depth N --fanout N --task-count N --sleep-ms N --config-id TEXT\n"
+               "  --local-capacity N --spawn-pattern uniform|hotspot\n"
+               "  --program bench_notify_scan --arrival-rate N (sparse pool publications)\n";
         std::exit(0);
     }
     if ((argc - 1) % 2 != 0) {
@@ -114,6 +116,10 @@ Config parse_config(int argc, char** argv) {
             c.producers = integer(value);
         } else if (key == "--capacity") {
             c.capacity = integer(value);
+        } else if (key == "--local-capacity") {
+            c.local_capacity = integer(value);
+        } else if (key == "--spawn-pattern") {
+            c.spawn_pattern = value;
         } else if (key == "--work") {
             c.work = integer(value);
         } else if (key == "--seed") {
@@ -147,18 +153,22 @@ Config parse_config(int argc, char** argv) {
     const std::vector<std::string> programs = {
         "bench_empty_task", "bench_submit_path",   "bench_producer_scaling", "bench_fine_grain",
         "bench_burst",      "bench_latency",       "bench_idle_cpu",         "bench_baselines",
-        "bench_alloc_cost", "bench_shutdown_drain"};
+        "bench_alloc_cost", "bench_shutdown_drain", "bench_worker_scaling",   "bench_skew", "bench_notify_scan"};
     if (std::find(programs.begin(), programs.end(), c.program) == programs.end()) {
-        throw std::invalid_argument("unknown or M1-inapplicable program: " + c.program);
+        throw std::invalid_argument("unknown program: " + c.program);
     }
     if (c.workers == 0 || c.workers > 256 || c.producers == 0 || c.producers > 256 ||
         c.capacity < 16 || c.capacity > (1U << 24) || (c.capacity & (c.capacity - 1)) != 0 ||
-        c.duration <= 0 || c.duration > 3600 || c.warmup < 0 || c.warmup > 3600 ||
-        c.arrival_rate < 0 || c.arrival_rate > 1e9 || c.sample_stride == 0 ||
-        c.sample_capacity == 0 || c.sample_capacity > 1'000'000 || c.work > 1'000'000 ||
-        c.depth > 16 || c.fanout == 0 || c.fanout > 4 || c.task_count == 0 ||
+        c.local_capacity < 16 || c.local_capacity > (1U << 24) ||
+        (c.local_capacity & (c.local_capacity - 1)) != 0 || c.duration <= 0 || c.duration > 3600 ||
+        c.warmup < 0 || c.warmup > 3600 || c.arrival_rate < 0 || c.arrival_rate > 1e9 ||
+        c.sample_stride == 0 || c.sample_capacity == 0 || c.sample_capacity > 1'000'000 ||
+        c.work > 1'000'000 || c.depth > 16 || c.fanout == 0 || c.fanout > 4 || c.task_count == 0 ||
         c.task_count > 1'000'000 || c.sleep_ms < 0 || c.sleep_ms > 1000) {
         throw std::invalid_argument("configuration outside benchmark bounds");
+    }
+    if (c.spawn_pattern != "uniform" && c.spawn_pattern != "hotspot") {
+        throw std::invalid_argument("unknown spawn pattern");
     }
     if (c.rejection != "abort" && c.rejection != "caller-runs") {
         throw std::invalid_argument("benchmark rejection must be abort or caller-runs");
@@ -190,12 +200,17 @@ Config parse_config(int argc, char** argv) {
         throw std::invalid_argument("controlled queue requires exactly one consumer");
     }
     if ((c.program == "bench_burst" || c.program == "bench_shutdown_drain" ||
-         c.program == "bench_idle_cpu" || c.program == "bench_baselines") &&
+         c.program == "bench_idle_cpu" || c.program == "bench_baselines" ||
+         c.program == "bench_worker_scaling" || c.program == "bench_skew") &&
         c.producers != 1) {
         throw std::invalid_argument("this workload has one driver");
     }
-    if (c.program == "bench_latency" && c.arrival_rate <= 0) {
-        throw std::invalid_argument("latency requires a fixed positive arrival rate");
+    if ((c.program == "bench_worker_scaling" || c.program == "bench_skew") &&
+        c.rejection != "abort") {
+        throw std::invalid_argument("local batch roots require external Abort; worker fallback remains inline");
+    }
+    if ((c.program == "bench_latency" || c.program == "bench_notify_scan") && c.arrival_rate <= 0) {
+        throw std::invalid_argument("latency/notify scan requires a fixed positive arrival rate");
     }
     if (c.program == "bench_baselines" && c.capacity < c.workers) {
         throw std::invalid_argument("baseline batch requires capacity >= workers");
@@ -281,7 +296,7 @@ ThreadPoolOptions pool_options(const Config& c) {
     ThreadPoolOptions options;
     options.worker_count = c.workers;
     options.global_queue_capacity = c.capacity;
-    options.local_deque_capacity = 16;
+    options.local_deque_capacity = c.local_capacity;
     options.pin_to_cores = !c.worker_cpus.empty();
     options.rejection =
         c.rejection == "abort" ? RejectionPolicy::Abort : RejectionPolicy::CallerRuns;
@@ -346,17 +361,23 @@ void print_result(const Config& c, const Result& r) {
         fields.emplace_back(std::move(key), out.str());
     };
     const auto info = build_info();
+    const bool event_count = std::string(parking_backend()) == "eventcount";
+    const bool local_batch = c.program == "bench_worker_scaling" || c.program == "bench_skew";
     put("program", c.program);
     put("mode", c.mode);
     put("config_hash", c.config_id);
     const bool execution = c.mode == "pool" || c.mode == "async" || c.mode == "thread";
-    const bool ring = c.mode == "pool" || c.mode == "queue" || c.mode == "mpmc" || c.mode == "cross";
-    put("backend", c.mode == "pool" ?
-        (std::string(info.platform) == "Linux" ? "pthread-" : "generic-") +
-            std::string(global_queue_backend()) + "-cv" : c.mode);
+    const bool ring =
+        c.mode == "pool" || c.mode == "queue" || c.mode == "mpmc" || c.mode == "cross";
+    put("backend", c.mode == "pool"
+                       ? (std::string(info.platform) == "Linux" ? "pthread-" : "generic-") +
+                             std::string(global_queue_backend()) + "-" + scheduling_backend() +
+                             "-" + parking_backend() + (event_count ? std::string("-") + event_count_backend() : "")
+                       : c.mode);
     put("window_kind", c.program == "bench_shutdown_drain" ? "finite-inventory" : "fixed-time");
     put("latency_definition",
-        c.program == "bench_shutdown_drain" ? "task-body-wall" : "submit-before-wrap-to-body-end");
+        local_batch ? "not-sampled" :
+        (c.program == "bench_shutdown_drain" ? "task-body-wall" : "submit-before-wrap-to-body-end"));
     put("compiler", info.compiler);
     put("build_type", info.build_type);
     put("sanitizer", info.sanitizer);
@@ -367,8 +388,19 @@ void print_result(const Config& c, const Result& r) {
     put("worker_cpus", cpus_text(c.worker_cpus));
     put("queue_slot_bytes", ring ? ((c.mode == "mpmc" || (c.mode == "pool" && std::string(global_queue_backend()) == "mpmc")) ? MPMCQueue<Task*>::slot_size : sizeof(Task*)) : 0);
     put("global_slots", ring ? c.capacity : 0);
-    put("local_slots", 0);
-    put("total_slots", ring ? c.capacity : 0);
+    const auto local_slots =
+        c.mode == "pool" && std::string(scheduling_backend()) == "work-stealing" ? c.local_capacity
+                                                                                 : 0;
+    put("local_slots", local_slots);
+    put("local_slot_bytes", local_slots != 0 ? sizeof(std::atomic<Task*>) : 0);
+    put("total_slots", (ring ? c.capacity : 0) + c.workers * local_slots);
+    put("spawn_pattern", c.spawn_pattern);
+    put("root_tasks", r.root_tasks);
+    put("leaf_tasks", r.leaf_tasks);
+    put("worker_leaf_ops_s",
+        r.leaf_tasks != 0
+            ? static_cast<double>(r.stats.worker_completed - r.root_tasks) / r.elapsed_seconds
+            : -1);
     put("payload", c.program == "bench_shutdown_drain" ? "sleep-inventory" : c.payload);
     put("work", c.work);
     put("seed", c.seed);
@@ -381,6 +413,8 @@ void print_result(const Config& c, const Result& r) {
     put("process_cpu_s", r.process_cpu_seconds);
     put("submit_cpu_s", r.submit_cpu_seconds);
     put("task_cpu_s", r.task_cpu_seconds);
+    put("worker_cpu_s", local_batch ? r.process_cpu_seconds - r.submit_cpu_seconds : -1);
+    put("worker_cpu_scope", local_batch ? "process-minus-driver" : "not-sampled");
     put("task_cpu_scope", c.program == "bench_shutdown_drain" ? "all-task-bodies" : "not-sampled");
     put("throughput_boundary", "measured-start-to-quiescence");
     const auto total = r.has_pool_stats ? r.stats.completed : r.accepted;
@@ -437,9 +471,8 @@ void print_result(const Config& c, const Result& r) {
     put("fanout", c.fanout);
     put("task_count", c.task_count);
     put("sleep_ms", c.sleep_ms);
-    put("stats_scope",
-        r.has_pool_stats
-            ? "producers-joined-shutdown-drain;completion-totals-stable;wakes-may-finish-later"
+    put("stats_scope", r.has_pool_stats ? "producers-joined-shutdown-drain;completion-totals-"
+                                          "stable;wakes-may-finish-later"
             : "not-a-pool");
     const auto& s = r.stats;
     put("submitted", s.submitted);
@@ -452,14 +485,22 @@ void print_result(const Config& c, const Result& r) {
     put("stolen", s.stolen);
     put("local_spills", s.local_spills);
     put("wakes", s.wakes);
+    put("wake_count_scope", event_count ? "marked-slot-backend-calls" : "cv-notify-requests");
     put("wake_threads", s.wake_threads ? std::to_string(*s.wake_threads) : "NA");
     put("post_wake_hit", s.post_wake_hit);
     put("post_wake_empty", s.post_wake_empty);
     put("pre_sleep_scan_hit", s.pre_sleep_scan_hit);
     put("pre_sleep_scan_empty", s.pre_sleep_scan_empty);
     put("notify_scan_slots", s.notify_scan_slots);
+    put("epoch", s.epoch);
+    put("registered_waiters", s.registered_waiters);
+    put("wait_calls", s.wait_calls);
+    put("wait_returns", s.wait_returns);
+    put("wait_syscalls", s.wait_syscalls ? std::to_string(*s.wait_syscalls) : "NA");
+    put("wait_eagain", s.wait_eagain ? std::to_string(*s.wait_eagain) : "NA");
+    put("wait_eintr", s.wait_eintr ? std::to_string(*s.wait_eintr) : "NA");
     put("protocol_attribution",
-        r.has_pool_stats ? "gate,pending,submitted,alloc:present;epoch,WaitSlot,slot-seq:NA"
+        r.has_pool_stats ? (event_count ? "gate,pending,submitted,alloc,epoch,WaitSlot,slot-seq:present" : "gate,pending,submitted,alloc:present;epoch,WaitSlot:NA;slot-seq:backend-dependent")
                          : "isolated-control;pool-protocol:NA");
     for (std::size_t i = 0; i < fields.size(); ++i) {
         if (i) {

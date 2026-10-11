@@ -83,6 +83,74 @@
       "cacheVariables": {
         "MAGPIE_QUEUE_BACKEND": "mpmc"
       }
+    },
+    {
+      "name": "release-workstealing",
+      "inherits": "release-mpmc",
+      "binaryDir": "${sourceDir}/build/release-workstealing",
+      "cacheVariables": {
+        "MAGPIE_ENABLE_WORK_STEALING": "ON"
+      }
+    },
+    {
+      "name": "tsan-workstealing",
+      "inherits": "tsan-mpmc",
+      "binaryDir": "${sourceDir}/build/tsan-workstealing",
+      "cacheVariables": {
+        "MAGPIE_ENABLE_WORK_STEALING": "ON"
+      }
+    },
+    {
+      "name": "asan-ubsan-workstealing",
+      "inherits": "asan-ubsan-mpmc",
+      "binaryDir": "${sourceDir}/build/asan-ubsan-workstealing",
+      "cacheVariables": {
+        "MAGPIE_ENABLE_WORK_STEALING": "ON"
+      }
+    },
+    {
+      "name": "bench-workstealing",
+      "inherits": "bench-mpmc",
+      "binaryDir": "${sourceDir}/build/bench-workstealing",
+      "cacheVariables": {
+        "MAGPIE_ENABLE_WORK_STEALING": "ON"
+      }
+    },
+    {
+      "name": "release-eventcount",
+      "inherits": "release-workstealing",
+      "binaryDir": "${sourceDir}/build/release-eventcount",
+      "cacheVariables": {
+        "MAGPIE_PARKING_BACKEND": "eventcount",
+        "MAGPIE_EVENTCOUNT_BACKEND": "auto"
+      }
+    },
+    {
+      "name": "tsan-eventcount",
+      "inherits": "tsan-workstealing",
+      "binaryDir": "${sourceDir}/build/tsan-eventcount",
+      "cacheVariables": {
+        "MAGPIE_PARKING_BACKEND": "eventcount",
+        "MAGPIE_EVENTCOUNT_BACKEND": "auto"
+      }
+    },
+    {
+      "name": "asan-ubsan-eventcount",
+      "inherits": "asan-ubsan-workstealing",
+      "binaryDir": "${sourceDir}/build/asan-ubsan-eventcount",
+      "cacheVariables": {
+        "MAGPIE_PARKING_BACKEND": "eventcount",
+        "MAGPIE_EVENTCOUNT_BACKEND": "auto"
+      }
+    },
+    {
+      "name": "bench-eventcount",
+      "inherits": "bench-workstealing",
+      "binaryDir": "${sourceDir}/build/bench-eventcount",
+      "cacheVariables": {
+        "MAGPIE_PARKING_BACKEND": "eventcount",
+        "MAGPIE_EVENTCOUNT_BACKEND": "auto"
+      }
     }
   ],
   "buildPresets": [
@@ -124,6 +192,46 @@
     {
       "name": "bench-mpmc",
       "configurePreset": "bench-mpmc",
+      "configuration": "Release"
+    },
+    {
+      "name": "release-workstealing",
+      "configurePreset": "release-workstealing",
+      "configuration": "Release"
+    },
+    {
+      "name": "tsan-workstealing",
+      "configurePreset": "tsan-workstealing",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "asan-ubsan-workstealing",
+      "configurePreset": "asan-ubsan-workstealing",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "bench-workstealing",
+      "configurePreset": "bench-workstealing",
+      "configuration": "Release"
+    },
+    {
+      "name": "release-eventcount",
+      "configurePreset": "release-eventcount",
+      "configuration": "Release"
+    },
+    {
+      "name": "tsan-eventcount",
+      "configurePreset": "tsan-eventcount",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "asan-ubsan-eventcount",
+      "configurePreset": "asan-ubsan-eventcount",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "bench-eventcount",
+      "configurePreset": "bench-eventcount",
       "configuration": "Release"
     }
   ],

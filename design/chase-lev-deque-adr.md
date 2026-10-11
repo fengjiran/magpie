@@ -1,6 +1,6 @@
 # ADR-001：有界 Chase-Lev deque——单元素认领与池层溢出
 
-- 状态：**已修订，待实现验证（v2.0，2026-10-03）**。
+- 状态：**M4 候选已实现，本机验证通过，Linux/ARM64 与正式性能门禁未关闭（v2.1，2026-10-04）**。
 - 上位约束：[magpie设计方案.md](magpie设计方案.md) §5、§7.1、§10。
 - 依据：[审核报告](review-2026-10-03.md) R1–R4。撤回 v1.x 批量 CAS 区间互斥及 overflow 容量证明，旧证明不能作为实现依据。
 
@@ -22,6 +22,8 @@
 | 统计 | 池层在本地 try_push 失败时记 local_spills；deque 不记统计 |
 
 池层最多重复 STEAL_CAP 次单元素 steal，每项都有独立 CAS；首个失败即停止。全局 dequeue_bulk 的 limit 钳制为 min(BULK_LIMIT, local_capacity)。仅本地为空时接收，整批转移完成前不执行用户代码。
+
+2026-10-04 M5 审核修订：非空批次保留第一项直接执行，只把其余项逆序发布到接收端 deque。禁止整批重新发布后再 pop 执行项，否则并发接收者可持续互相窃取而没有任务推进。剩余项发布完成、注销等待注册并通知以后才执行保留项；原语内存序及批容量上限不变。
 
 删除 spill_lowest_half、overflow 双缓冲、take_overflow 和 drain_spill_overflow。R3/R4 通过消除半批暂存协议修复。内部局部满是已接受任务的调度降级，不走配置的 Abort/DiscardOldest，始终以完成任务为义务。
 
@@ -54,7 +56,7 @@
 
 保留 pop 与 steal **两侧** SC fence；不能用单侧屏障代替。发布、槽复用、失败候选规则均是证明义务。
 
-一手对照：[Taskflow BoundedWSQ](https://taskflow.github.io/taskflow/wsq_8hpp_source.html)。只采用结构，不引入第三方依赖；正式实现记录对照源码 commit。上游源码存在不等于本实现已验证。
+一手对照：[Taskflow BoundedWSQ](https://taskflow.github.io/taskflow/wsq_8hpp_source.html)。只采用结构，不引入第三方依赖。固定源码对照为 [Taskflow v3.7.0](https://github.com/taskflow/taskflow/releases/tag/v3.7.0)，commit `7d9e85b6b2e9bf501021f857f2f3cbe43bc37c85` 的 [`taskflow/core/tsq.hpp`](https://github.com/taskflow/taskflow/blob/7d9e85b6b2e9bf501021f857f2f3cbe43bc37c85/taskflow/core/tsq.hpp)：该版本是可扩容/priority 队列，只对照其单元素核心；本项目不采用扩容或 priority。其 bottom 发布 store / CAS 失败内存序比本项目更弱，本项目保留上表保守基线。上游源码存在不等于本实现已验证。
 
 放宽门禁：标准内存模型书面论证、有界模型检查、对应 sanitizer 测试、ARM64 实测、同日 benchmark。TSan 不证明原子算法正确；不预先认定 acq_rel CAS 或免 fence 变体等价。
 
@@ -79,3 +81,7 @@ top/bottom 用 int64_t；产生超出范围索引前必须执行 release 也有�
 | DequeIndexLimit | 上限前确定失败，无 signed overflow |
 
 旧 BulkStealInterleave/SpillVsSteal/SpillOverflowReentrancy 由上述测试替代；旧缺陷保留在审核报告。实现、模型检查与平台证据齐全前不标记“已验证”。
+
+## 7. M4 实施状态
+
+生产原语见 `include/magpie/chase_lev_deque.hpp`，池层转投/接收/通知见 `src/thread_pool.cpp`。本机三变体、R1/R2、slot reuse、容量16/1024、历史 oracle、百万唯一ID与RC11正反模型已执行；具体命令和边界见 [M4 milestone](../docs/milestones/M4.md)。原语模型使用容量2/8，不覆盖整个 C++ wrapper/索引上限/平台ABI；上限另用实际 Release/UBSan测试。M4仍为编译候选，不关闭Linux/ARM64正式门禁，也不放宽内存序。

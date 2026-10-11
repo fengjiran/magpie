@@ -24,6 +24,9 @@ def main() -> int:
     parser.add_argument("--cache-line", required=True)
     parser.add_argument("--shared", choices=("ON", "OFF"), required=True)
     parser.add_argument("--queue-backend", choices=("mutex", "mpmc"), default="mutex")
+    parser.add_argument("--work-stealing", choices=("ON", "OFF"), default="OFF")
+    parser.add_argument("--parking-backend", choices=("cv", "eventcount"), default="cv")
+    parser.add_argument("--eventcount-backend", choices=("auto", "generic", "futex"), default="auto")
     args = parser.parse_args()
 
     configure = [
@@ -36,6 +39,9 @@ def main() -> int:
         f"-DMAGPIE_CACHE_LINE={args.cache_line}",
         f"-DMAGPIE_BUILD_SHARED={args.shared}",
         f"-DMAGPIE_QUEUE_BACKEND={args.queue_backend}",
+        f"-DMAGPIE_ENABLE_WORK_STEALING={args.work_stealing}",
+        f"-DMAGPIE_PARKING_BACKEND={args.parking_backend}",
+        f"-DMAGPIE_EVENTCOUNT_BACKEND={args.eventcount_backend}",
         f"-DMAGPIE_EXPECT_SHARED={args.shared}",
         "-DBUILD_TESTING=OFF",
     ]
