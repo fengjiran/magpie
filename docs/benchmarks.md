@@ -40,11 +40,17 @@ M4 harness 新增 `bench_worker_scaling` 和 `bench_skew`，global 构建可作 
 
 默认每 producer 65536 条记录，每 1024 次尝试采样一次；拒绝样本没有完成记录。存储耗尽会使 runner 失败，需要在新目录调整 stride/capacity，不能用截断样本宣称全窗口 p99。饱和时成功样本可能少于尝试样本，拒绝数单列。固定到达率使用从测量开始推算的绝对 deadline；落后后追赶，窗口关闭后不继续补发；`arrival_lag_*` 和 `missed_arrivals` 明示供给不足，submit latency 不包括未进入 submit 的排队时间。
 
-64 个对数桶覆盖 1 μs–1 s，桶宽比约为 `10^(6/64)≈1.241`。p50/p99/p999 是保守桶上界，不是精确 quantile；小于 1 μs 的 underflow 计入首桶，≥1 s overflow 独立计数，quantile 落入 overflow 时输出 `inf`。无样本或不适用数值输出 `-1`，不解释为零延迟。原始 TSV 同时保存完整桶计数和 worker/inline 分组。submit→body-end 早于 capture 析构和 pending 递减；shutdown fixture 的 latency 字段特指 task body wall，不与 submit latency 比较。
+64 个对数桶覆盖 1 μs–1 s，桶宽比约为 `10^(6/64)≈1.241`。既有 `*_us_upper` 列继续表示桶上界，underflow/overflow 计数保留。2026-11-05 起，新增 `p50_us/p99_us/p999_us` 及 worker/inline/arrival_lag 对应列，从全部有效样本按 nearest rank 计算，定义字段为 `nearest-rank-sample-v1`。聚合、排序和归档均在计时窗口之后执行，不增加热路径打点。无样本为 `-1`；精确表示对已收集样本精确，不消除采样和跨进程不确定性。
+
+旧桶上界之比不能证明 5% p99 门槛，旧归档缺精确列时标记待补证。`compare_p99` 只比较各进程样本 p99 的中位数，不证明无新峰或统计置信界。runner 的 `bench_latency` 每进程另存 `run-XX.samples.tsv`（纳秒 latency/arrival lag、执行分类及 SHA-256），用于复核分布；旧 binary 不产生文件时 manifest 明示证据缺失。I/O 路径通过独立环境变量传递，不改变负载配置 hash；直接运行可用 `--samples-output PATH`。warmup 不写归档，已存在文件拒绝覆盖。
+
+原始 TSV 仍保存全部桶计数和执行分组。submit→body-end 早于 capture 析构和 pending 递减；shutdown latency 特指 task body wall。新口径 A/B 需用同一 harness 测量 mutex 和候选，另建冻结源码/binary/校验和，保留旧包，不能从旧聚合桶恢复精确分位数。
 
 准确的 completion totals 在 producers 已 join、shutdown、drain 后校核 `pending=0`、`submitted=completed+discarded`、`completed=worker_completed+inline_completed`。M1 公开 API 不提供独立 join，因此最后 worker 的关闭通知可能仍在完成，`wakes` 不是严格最终通知总数；`wake_threads=NA`。M1 没有的 steal/scan 字段保持零，不能宣称这些路径被测量。`peak_threads_bound` 为结构上限，不冒充采样得到的峰值。
 
 shutdown 的 setup、预分配和工作门等待不计入测量；warmup 至少达到指定时间。它是 benchmark-plan 规定的有限存量实验，`duration` 不是强行截断这些任务的 deadline，`window_kind=finite-inventory`；剩余程序使用固定时间窗口。存量 10^3/10^4、10/100 ms 在完整 suite 中保留，smoke 只用 32 项×0.1 ms。`task_cpu_s` 为任务 body 实际 thread CPU 累计，不能拿 sleep wall 当有效 CPU 工作。
+
+`--shutdown-pattern` 支持 uniform（原均匀存量）、single-tail（仅最后一项长任务，允许 task-count=1）、mixed（每四项一项长任务，其余为其百分之一时长）、caller-runs。后者要求 rejection=caller-runs、task-count=capacity：先逐一占用所有 worker，再填全局队列，由额外 producer 内联执行最后任务；shutdown 等该提交离门后再释放工作门。其 task CPU 包含 shutdown 窗口的 inline body，不能直接用 drain_cpu−全部 task_cpu 解释纯忙等。
 
 ## 资源与完整矩阵
 
@@ -53,10 +59,10 @@ Linux 配置同时指定 `worker-cpus` 和 `producer-cpus`（逗号分隔、不�
 ```sh
 # Linux: config.json 填写实测可用集合，例如 worker-cpus/producer-cpus。
 python3 scripts/run_benchmarks.py suite --config config.json \
-  --repeat 5 --physical-linux-attested --output results/linux-m2-NEW
+  --repeat 5 --platform-attested physical --output results/linux-m2-NEW
 ```
 
-suite 默认覆盖 producer 1/2/4/8、四种粒度、四种树深度、三种基础模型、分配、空载及四个 shutdown 存量配置；完成 empty 配置后自动以其 median worker throughput 标定同资源空任务 latency 三组到达率。完整矩阵耗时较长。`--physical-linux-attested` 需要操作者确认固定物理 Linux，不能由 Linux uname 自动推出；没有该确认或没有明确 CPU 集合，不产生正式平台资格。macOS smoke 和本机长窗口都不能替代这个门禁。
+suite 保留原矩阵，并为支持新参数的 binary 增加 single-tail/mixed/caller-runs 关闭场景；完成 empty 后按 median worker throughput 标定同资源空任务 latency。`--platform-attested physical|wsl2` 需要操作者确认 CPU 集合及固定环境，WSL2 另核对虚拟化检测，登记见 benchmark-plan。平台资格不等于性能门槛已通过。
 
 记录 CPU 型号/核/SMT、允许 CPU、cgroup v2 quota、NUMA/topology、可读取的频率策略、工具链和依赖；cgroup v1 quota 未解析时明确 unavailable，正式报告须补齐。Linux 最低工具链和 pthread backend 尚需 CI/原生结果。Linux 主机/CPU 配额/频率策略没有实际控制时，不凭脚本存在宣称资源一致。
 
@@ -107,4 +113,4 @@ M3 仍需通知 mutex 与 gate/pending/submitted/alloc，没有 epoch。本机�
 
 `bench_notify_scan --arrival-rate N` 复用实际池稀疏提交，输出 epoch、扫描总槽数、backend wake/return、注册数和 submit→body-end 的分组直方图。它不强制恰有0/1/N个注册者，也不隔离每个 RMW 的成本；读数是完整池的合计。比较 wakes 时注意 `wake_count_scope`：CV为notify请求，EventCount为成功标记后的backend调用。Linux才有实际wake_threads及wait_syscalls/EAGAIN/EINTR；generic输出NA。
 
-M5关闭期持续探测，必须同时报告shutdown/drain/join的wall、process CPU和task CPU；不能以sleep wall当有效CPU。回归/修复后的机制对照不得覆盖旧binary或原始失败。当前修复、开发测量和原生门禁见 [M5 milestone](milestones/M5.md)。
+M5 历史版本关闭期持续探测；2026-11-05 起以最终 pending/gate 通知支持关停停车。须同时报告 shutdown/drain/join 的 wall、process CPU 和 task CPU，不能以 sleep wall 当有效 CPU。新对照不得覆盖旧 binary 或失败，见 [M6 修复记录](milestones/M6-review-fixes.md)；原生历史证据见 [M5 milestone](milestones/M5.md)。

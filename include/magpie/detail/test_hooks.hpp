@@ -39,6 +39,8 @@ enum class PoolTestHookPoint {
     EventSignalBeforeWake,
     EventAfterLeave,
     EventAfterBackendReturn,
+    CvAfterProbeBeforeParkLock,
+    ShutdownBeforeGateWait,
 };
 
 struct PoolTestHooks {

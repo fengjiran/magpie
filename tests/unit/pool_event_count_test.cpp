@@ -7,6 +7,7 @@
 #include <magpie/detail/test_hooks.hpp>
 #include <magpie/thread_pool.hpp>
 #include <thread>
+#include <utility>
 
 // 标定形态下测试 target 由 CMake 传入映射宏；未传入时使用主设计 §16.2 默认。
 #if !defined(MAGPIE_BULK_LIMIT)
@@ -214,10 +215,12 @@ struct ExecutionClaim {
                 s.observe_peer();
             }
         }
-        if (point == P::BeforeVictimProbe && s.owner.load() < 2 &&
-            worker != s.owner.load() && ++s.peer_probes >= 2) {
-            // Reaching the next probe proves that the previous steal returned
-            // while the receiver was still paused. No timing assumption needed.
+        if (point == P::BeforeVictimProbe && worker != s.owner.load()) {
+            ++s.peer_probes;
+        }
+        if (point == P::WorkerBeforeWait && s.owner.load() < 2 && worker != s.owner.load()) {
+            // The final scan has returned without stealing the private claim.
+            // A closing worker can now park rather than repeatedly probing.
             s.observe_peer();
         }
     }
@@ -331,4 +334,127 @@ TEST(PoolEventCount, BatchRemainderWakesParkedWorker) {
     pool.drain();
     EXPECT_EQ(pool.stats().pending, 0U);
     EXPECT_EQ(pool.stats().completed, 18U);
+}
+
+namespace {
+struct ClosingWait {
+    std::atomic<bool> stopped{false}, recorded{false}, initial_used{false};
+    std::atomic<unsigned> exits{0};
+    std::latch parked{1}, resume_backend{1}, initial_prepare{1}, resume_prepare{1};
+    bool pause_backend = false, hold_initial = false;
+    static void hook(P point, std::size_t, void *context) noexcept {
+        auto &s = *static_cast<ClosingWait *>(context);
+        thread_local bool prepared_after_stop = false;
+        if (point == P::ShutdownAfterStop) {
+            s.stopped.store(true);
+        }
+        if (point == P::BeforeEventPrepare) {
+            if (s.hold_initial && !s.initial_used.exchange(true)) {
+                s.initial_prepare.count_down();
+                s.resume_prepare.wait();
+            }
+            prepared_after_stop = s.stopped.load();
+        }
+        if (point == P::EventBeforeBackendWait && prepared_after_stop &&
+            !s.recorded.exchange(true)) {
+            s.parked.count_down();
+            if (s.pause_backend) {
+                s.resume_backend.wait();
+            }
+        }
+        if (point == P::WorkerExit) {
+            s.exits.fetch_add(1);
+            s.exits.notify_all();
+        }
+    }
+    void wait_exits(unsigned count) {
+        for (auto seen = exits.load(); seen < count; seen = exits.load()) {
+            exits.wait(seen);
+        }
+    }
+};
+
+void closing_pending(bool pause_backend) {
+    ClosingWait state;
+    state.pause_backend = pause_backend;
+    magpie::detail::PoolTestHooks hooks{ClosingWait::hook, nullptr, &state};
+    magpie::detail::install_pool_test_hooks(&hooks);
+    struct Reset {
+        ~Reset() { magpie::detail::install_pool_test_hooks(nullptr); }
+    } reset;
+    magpie::test::Watchdog watchdog([&] {
+        std::fprintf(stderr, "closing pending parked=%d exits=%u\n", state.recorded.load(),
+                     state.exits.load());
+    });
+    std::latch started{1}, release{1};
+    magpie::ThreadPool pool(options(2));
+    pool.submit([&] {
+        started.count_down();
+        release.wait();
+    });
+    started.wait();
+    pool.shutdown();
+    state.parked.wait(); // New registration after shutdown's notify_all.
+    release.count_down();
+    if (pause_backend) {
+        state.wait_exits(1); // Completion has signaled before the syscall.
+        state.resume_backend.count_down();
+    }
+    state.wait_exits(2); // No second shutdown/destructor may rescue a lost wake.
+    EXPECT_EQ(pool.stats().pending, 0U);
+    EXPECT_EQ(pool.stats().registered_waiters, 0U);
+}
+} // namespace
+
+TEST(PoolEventCount, FinalPendingZeroWakesClosingWorker) { closing_pending(false); }
+TEST(PoolEventCount, FinalPendingZeroBeforeKernelWait) { closing_pending(true); }
+
+TEST(PoolEventCount, FinalGateZeroWakesClosingWorkerWithoutPending) {
+    ClosingWait state;
+    state.hold_initial = true;
+    magpie::detail::PoolTestHooks hooks{ClosingWait::hook, nullptr, &state};
+    magpie::detail::install_pool_test_hooks(&hooks);
+    struct Reset {
+        ~Reset() { magpie::detail::install_pool_test_hooks(nullptr); }
+    } reset;
+    magpie::test::Watchdog watchdog([&] {
+        std::fprintf(stderr, "closing gate parked=%d exits=%u\n", state.recorded.load(),
+                     state.exits.load());
+    });
+    std::latch retiring{1}, release_capture{1};
+    struct Capture {
+        std::latch *retiring;
+        std::latch *release;
+        Capture(std::latch *a, std::latch *b) : retiring(a), release(b) {}
+        Capture(Capture &&other) noexcept
+            : retiring(std::exchange(other.retiring, nullptr)), release(other.release) {}
+        ~Capture() noexcept {
+            if (retiring) {
+                retiring->count_down();
+                release->wait();
+            }
+        }
+        void operator()() const noexcept {}
+    };
+    magpie::ThreadPool pool(options());
+    state.initial_prepare.wait();
+    pool.shutdown();
+    std::atomic<bool> rejected{false};
+    std::thread submitter([&] {
+        try {
+            pool.submit(Capture{&retiring, &release_capture});
+        } catch (const magpie::QueueFullError &e) {
+            rejected.store(e.reason == magpie::QueueFullReason::ShuttingDown);
+        }
+    });
+    retiring.wait(); // Rejected submission holds the gate but never adds pending.
+    state.resume_prepare.count_down();
+    state.parked.wait();
+    release_capture.count_down();
+    submitter.join();
+    state.wait_exits(1);
+    EXPECT_TRUE(rejected.load());
+    EXPECT_EQ(pool.stats().submitted, 0U);
+    EXPECT_EQ(pool.stats().pending, 0U);
+    EXPECT_EQ(pool.stats().registered_waiters, 0U);
 }

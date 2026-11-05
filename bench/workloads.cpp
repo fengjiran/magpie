@@ -264,7 +264,7 @@ Result pool_run(const Config& c, double duration, bool measured) {
     if (r.accepted != r.stats.submitted || r.refused + r.accepted != r.attempts) {
         throw std::runtime_error("producer/pool totals disagree");
     }
-    collect_samples(r, samples);
+    collect_samples(r, samples, c.samples_output);
     r.peak_threads_bound = 1 + c.workers + c.producers;
     return r;
 }
@@ -670,33 +670,80 @@ Result baseline_run(const Config& c, double duration, bool measured) {
         finish_pool(r, *fixture, begin, cpu_begin);
     }
     r.peak_threads_bound = c.workers + 1;
-    collect_samples(r, samples);
+    collect_samples(r, samples, c.samples_output);
     return r;
 }
 
 Result shutdown_run(const Config& c) {
     PoolFixture fixture(c);
     std::vector<std::vector<Sample>> samples(1);
-    samples[0].resize(c.task_count);
+    const bool caller = c.shutdown_pattern == "caller-runs";
+    const auto roots = caller ? c.workers : 0;
+    const auto total = c.task_count + roots + (caller ? 1 : 0);
+    samples[0].resize(total);
     std::latch release(1);
+    std::latch inline_started(1);
+    std::atomic<std::size_t> roots_started{0};
+    std::thread producer;
+    std::exception_ptr producer_error;
+    auto body = [&](std::size_t i, bool inline_task) {
+        if (!inline_task) {
+            release.wait();
+        }
+        const auto begin = Clock::now();
+        const auto cpu_begin = thread_cpu();
+        double delay = c.sleep_ms;
+        if (c.shutdown_pattern == "single-tail" && i + 1 != total) {
+            delay = 0;
+        }
+        if (c.shutdown_pattern == "mixed" && i % 4 != 0) {
+            delay /= 100;
+        }
+        std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(delay));
+        auto &sample = samples[0][i];
+        sample.cpu_ns = static_cast<std::uint64_t>(std::max(0.0, thread_cpu() - cpu_begin) * 1e9);
+        sample.latency_ns = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - begin).count());
+        sample.inline_execution = inline_task;
+        sample.ready = true;
+    };
     try {
-        for (std::size_t i = 0; i < c.task_count; ++i) {
+        // Occupy workers one at a time before filling the global queue. Bulk
+        // receive must not hide blocked fixture roots behind another root.
+        for (std::size_t i = 0; i < roots; ++i) {
             fixture.pool->submit([&, i] {
-                release.wait();
-                const auto begin = Clock::now();
-                const auto cpu_begin = thread_cpu();
-                std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(c.sleep_ms));
-                auto& sample = samples[0][i];
-                sample.cpu_ns =
-                    static_cast<std::uint64_t>(std::max(0.0, thread_cpu() - cpu_begin) * 1e9);
-                sample.latency_ns = static_cast<std::uint64_t>(
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - begin)
-                        .count());
-                sample.ready = true;
+                roots_started.store(i + 1, std::memory_order_release);
+                roots_started.notify_one();
+                body(i, false);
             });
+            for (auto observed = roots_started.load(std::memory_order_acquire); observed != i + 1;
+                 observed = roots_started.load(std::memory_order_acquire)) {
+                roots_started.wait(observed, std::memory_order_acquire);
+            }
+        }
+        for (std::size_t i = 0; i < c.task_count; ++i) {
+            fixture.pool->submit([&, i] { body(i + roots, false); });
+        }
+        if (caller) {
+            producer = std::thread([&] {
+                try {
+                    pin_current(c.producer_cpus, 0);
+                    fixture.pool->submit([&] {
+                        inline_started.count_down();
+                        body(total - 1, true);
+                    });
+                } catch (...) {
+                    producer_error = std::current_exception();
+                    inline_started.count_down(); // Submission failed before execution.
+                }
+            });
+            inline_started.wait();
         }
     } catch (...) {
         release.count_down();
+        if (producer.joinable()) {
+            producer.join();
+        }
         fixture.pool->shutdown();
         fixture.pool->drain();
         throw;
@@ -707,6 +754,9 @@ Result shutdown_run(const Config& c) {
     fixture.pool->shutdown();
     const auto after_stop = Clock::now();
     const auto cpu_stop = process_cpu();
+    if (producer.joinable()) {
+        producer.join();
+    }
     release.count_down();
     fixture.pool->drain();
     const auto after_drain = Clock::now();
@@ -725,9 +775,12 @@ Result shutdown_run(const Config& c) {
     r.shutdown_cpu_seconds = cpu_stop - cpu_begin;
     r.drain_cpu_seconds = cpu_drain - cpu_stop;
     r.join_cpu_seconds = cpu_end - cpu_drain;
-    r.attempts = r.accepted = c.task_count;
-    r.peak_threads_bound = 1 + c.workers;
-    collect_samples(r, samples);
+    r.attempts = r.accepted = total;
+    r.peak_threads_bound = 1 + c.workers + (caller ? 1 : 0);
+    collect_samples(r, samples, c.samples_output);
+    if (producer_error) {
+        std::rethrow_exception(producer_error);
+    }
     // This fixture reports task-body wall time, not submission latency.
     return r;
 }

@@ -148,6 +148,10 @@ add_test(NAME magpie.watchdog-probe
 set_tests_properties(magpie.watchdog-probe PROPERTIES LABELS fast TIMEOUT 10)
 
 if(MAGPIE_BUILD_BENCHMARKS)
+    add_test(NAME magpie.benchmark-measurements
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/bench/test_measurements.py"
+                $<TARGET_FILE:magpie_bench>)
+    set_tests_properties(magpie.benchmark-measurements PROPERTIES LABELS fast TIMEOUT 30)
     add_test(NAME magpie.benchmark-queue-modes
         COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/bench/test_queue_modes.py"
                 $<TARGET_FILE:magpie_bench>)

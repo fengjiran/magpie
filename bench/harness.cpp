@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <iomanip>
@@ -91,6 +92,8 @@ Config parse_config(int argc, char** argv) {
                "  --worker-cpus ID,ID --producer-cpus ID,ID (Linux only)\n"
                "  --depth N --fanout N --task-count N --sleep-ms N --config-id TEXT\n"
                "  --local-capacity N --spawn-pattern uniform|hotspot\n"
+               "  --shutdown-pattern uniform|single-tail|mixed|caller-runs\n"
+               "  --samples-output PATH (exclusive raw sample archive)\n"
                "  --program bench_notify_scan --arrival-rate N (sparse pool publications)\n";
         std::exit(0);
     }
@@ -120,6 +123,10 @@ Config parse_config(int argc, char** argv) {
             c.local_capacity = integer(value);
         } else if (key == "--spawn-pattern") {
             c.spawn_pattern = value;
+        } else if (key == "--shutdown-pattern") {
+            c.shutdown_pattern = value;
+        } else if (key == "--samples-output") {
+            c.samples_output = value;
         } else if (key == "--work") {
             c.work = integer(value);
         } else if (key == "--seed") {
@@ -170,6 +177,17 @@ Config parse_config(int argc, char** argv) {
     if (c.spawn_pattern != "uniform" && c.spawn_pattern != "hotspot") {
         throw std::invalid_argument("unknown spawn pattern");
     }
+    if (c.shutdown_pattern != "uniform" && c.shutdown_pattern != "single-tail" &&
+        c.shutdown_pattern != "mixed" && c.shutdown_pattern != "caller-runs") {
+        throw std::invalid_argument("unknown shutdown pattern");
+    }
+    if (c.shutdown_pattern != "uniform" && c.program != "bench_shutdown_drain") {
+        throw std::invalid_argument("shutdown pattern applies only to shutdown fixture");
+    }
+    if (c.shutdown_pattern == "caller-runs" &&
+        (c.program != "bench_shutdown_drain" || c.rejection != "caller-runs")) {
+        throw std::invalid_argument("shutdown caller-runs fixture requires CallerRuns");
+    }
     if (c.rejection != "abort" && c.rejection != "caller-runs") {
         throw std::invalid_argument("benchmark rejection must be abort or caller-runs");
     }
@@ -217,6 +235,9 @@ Config parse_config(int argc, char** argv) {
     }
     if (c.program == "bench_shutdown_drain" && c.capacity < c.task_count) {
         throw std::invalid_argument("shutdown fixture needs capacity >= task-count");
+    }
+    if (c.shutdown_pattern == "caller-runs" && c.capacity != c.task_count) {
+        throw std::invalid_argument("shutdown caller-runs fixture needs task-count == capacity");
     }
     if (c.arrival_rate > 0 && c.mode != "pool") {
         throw std::invalid_argument("arrival-rate applies only to pool submission");
@@ -340,7 +361,20 @@ double Histogram::quantile(double fraction) const {
     }
     return std::numeric_limits<double>::infinity();
 }
-void collect_samples(Result& r, const std::vector<std::vector<Sample>>& records) {
+void collect_samples(Result &r, const std::vector<std::vector<Sample>> &records,
+                     const std::string &output) {
+    std::array<std::vector<std::uint64_t>, 4> values;
+    auto close_file = [](std::FILE *file) noexcept { (void)std::fclose(file); };
+    std::unique_ptr<std::FILE, decltype(close_file)> archive(nullptr, close_file);
+    if (!output.empty()) {
+        archive.reset(std::fopen(output.c_str(), "wx"));
+        if (!archive) {
+            throw std::runtime_error("cannot exclusively create sample archive: " + output);
+        }
+        if (std::fputs("latency_ns\tarrival_lag_ns\tinline_execution\n", archive.get()) < 0) {
+            throw std::runtime_error("cannot write sample archive");
+        }
+    }
     for (const auto& producer : records) {
         for (const auto& sample : producer) {
             if (!sample.ready) {
@@ -350,7 +384,33 @@ void collect_samples(Result& r, const std::vector<std::vector<Sample>>& records)
             r.arrival_lag.add(sample.arrival_lag_ns);
             (sample.inline_execution ? r.inline_latency : r.worker_latency).add(sample.latency_ns);
             r.task_cpu_seconds += static_cast<double>(sample.cpu_ns) * 1e-9;
+            values[0].push_back(sample.arrival_lag_ns);
+            values[1].push_back(sample.latency_ns);
+            values[sample.inline_execution ? 3 : 2].push_back(sample.latency_ns);
+            if (archive && std::fprintf(archive.get(), "%llu\t%llu\t%d\n",
+                                        static_cast<unsigned long long>(sample.latency_ns),
+                                        static_cast<unsigned long long>(sample.arrival_lag_ns),
+                                        sample.inline_execution ? 1 : 0) < 0) {
+                throw std::runtime_error("cannot write sample archive");
+            }
         }
+    }
+    if (archive && std::fflush(archive.get()) != 0) {
+        throw std::runtime_error("cannot flush sample archive");
+    }
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        auto &samples = values[i];
+        auto &q = r.quantiles[i];
+        q.count = samples.size();
+        if (samples.empty()) {
+            continue;
+        }
+        std::sort(samples.begin(), samples.end());
+        const auto n = samples.size();
+        // Integer nearest ranks avoid floating-point rounding at exact ranks.
+        q.p50_us = static_cast<double>(samples[n / 2 + n % 2 - 1]) / 1000;
+        q.p99_us = static_cast<double>(samples[n - n / 100 - 1]) / 1000;
+        q.p999_us = static_cast<double>(samples[n - n / 1000 - 1]) / 1000;
     }
 }
 void print_result(const Config& c, const Result& r) {
@@ -442,6 +502,9 @@ void print_result(const Config& c, const Result& r) {
     put("sample_stride", c.sample_stride);
     put("sample_capacity_per_producer", c.sample_capacity);
     put("sample_dropped", r.sample_dropped);
+    put("quantile_definition", "nearest-rank-sample-v1");
+    put("shutdown_pattern", c.shutdown_pattern);
+    std::size_t quantile_index = 0;
     for (const auto& [prefix, histogram] : std::array<std::pair<const char*, const Histogram*>, 4>{
              {{"arrival_lag_", &r.arrival_lag},
               {"", &r.total_latency},
@@ -455,6 +518,10 @@ void print_result(const Config& c, const Result& r) {
         put(std::string(prefix) + "p50_us_upper", histogram->quantile(.5));
         put(std::string(prefix) + "p99_us_upper", histogram->quantile(.99));
         put(std::string(prefix) + "p999_us_upper", histogram->quantile(.999));
+        const auto &q = r.quantiles[quantile_index++];
+        put(std::string(prefix) + "p50_us", q.p50_us);
+        put(std::string(prefix) + "p99_us", q.p99_us);
+        put(std::string(prefix) + "p999_us", q.p999_us);
         put(std::string(prefix) + "hist_underflow", histogram->underflow);
         put(std::string(prefix) + "hist_overflow", histogram->overflow);
         for (std::size_t i = 0; i < 64; ++i) {

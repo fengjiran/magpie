@@ -16,6 +16,17 @@ spec.loader.exec_module(runner)
 
 
 class RunnerTests(unittest.TestCase):
+    def test_p99_rejects_legacy_bounds_and_detects_same_bucket_regression(self):
+        legacy = [{"p99_us_upper": "60.429639"}]
+        self.assertEqual(runner.compare_p99(legacy, legacy)["status"], "insufficient-evidence")
+        base = {"quantile_definition": "nearest-rank-sample-v1", "samples": "10000",
+                "p99_us": "50", "p99_us_upper": "60.429639"}
+        candidate = dict(base, p99_us="60")
+        result = runner.compare_p99([base], [candidate])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["median_ratio"], 1.2)
+        self.assertEqual(runner.compare_p99([base], [base])["status"], "passed")
+
     def test_summary_independent_repeats(self):
         summary = runner.summarize([{"ops": str(v), "mode": "pool"} for v in (1, 2, 3, 4, 9)])
         self.assertEqual(summary["ops"], {"median": 3, "q1": 2, "q3": 4, "iqr": 2})

@@ -30,8 +30,21 @@ function(magpie_validate_toolchain)
 static_assert(std::same_as<int, int>);
 int main() { int values[1]{}; return std::span{values}.empty(); }
 ]] MAGPIE_HAS_REQUIRED_CXX20)
+    # Match the library's thread linkage, including platforms where wait uses
+    # pthread primitives outside libc.
+    list(APPEND CMAKE_REQUIRED_LIBRARIES Threads::Threads)
+    check_cxx_source_compiles([[#include <atomic>
+int main() {
+    std::atomic<unsigned long long> gate{0};
+    gate.notify_all();
+    gate.wait(1); // This value never blocks.
+}
+]] MAGPIE_HAS_ATOMIC_WAIT)
     unset(CMAKE_REQUIRED_FLAGS)
     if(NOT MAGPIE_HAS_REQUIRED_CXX20)
         message(FATAL_ERROR "The selected compiler and standard library do not provide the required C++20 facilities.")
+    endif()
+    if(NOT MAGPIE_HAS_ATOMIC_WAIT)
+        message(FATAL_ERROR "The selected standard library must provide C++20 atomic wait/notify.")
     endif()
 endfunction()

@@ -45,10 +45,10 @@ def config_hash(config):
     return hashlib.sha256(canonical(config).encode()).hexdigest()
 
 
-def execute(command, output=None, cwd=None, timeout=120):
+def execute(command, output=None, cwd=None, timeout=120, env=None):
     started = time.monotonic()
     try:
-        result = subprocess.run(command, cwd=cwd, capture_output=True, text=True,
+        result = subprocess.run(command, cwd=cwd, env=env, capture_output=True, text=True,
                                 timeout=timeout, check=False)
     except subprocess.TimeoutExpired as error:
         # Never erase a failed run or automatically retry it.
@@ -107,7 +107,7 @@ def environment():
 
 def load_config(path):
     values = json.loads(Path(path).read_text()) if path else {}
-    if not isinstance(values, dict) or any(k not in DEFAULTS and k not in {"worker-cpus", "producer-cpus", "local-capacity", "spawn-pattern"} for k in values):
+    if not isinstance(values, dict) or any(k not in DEFAULTS and k not in {"worker-cpus", "producer-cpus", "local-capacity", "spawn-pattern", "shutdown-pattern"} for k in values):
         raise ValueError("configuration must contain only known benchmark keys")
     if any(isinstance(value, (list, dict, bool)) or value is None for value in values.values()):
         raise ValueError("configuration values must be scalar strings or numbers")
@@ -134,6 +134,24 @@ def summarize(rows):
         result[key] = {"median": statistics.median(values), "q1": percentile(values, .25),
                        "q3": percentile(values, .75), "iqr": percentile(values, .75) - percentile(values, .25)}
     return result
+
+
+def compare_p99(reference_rows, candidate_rows):
+    """Compare empirical quantiles; legacy histogram bounds cannot fill this gap."""
+    groups = []
+    for rows in (reference_rows, candidate_rows):
+        if not rows or any(row.get("quantile_definition") != "nearest-rank-sample-v1"
+                           or float(row.get("samples", "0")) <= 0
+                           or not math.isfinite(float(row.get("p99_us", "nan")))
+                           or float(row.get("p99_us", "-1")) < 0 for row in rows):
+            return {"status": "insufficient-evidence", "reason": "missing exact sample p99"}
+        groups.append(statistics.median(float(row["p99_us"]) for row in rows))
+    reference, candidate = groups
+    if reference == 0:
+        return {"status": "insufficient-evidence", "reason": "zero reference p99"}
+    ratio = candidate / reference
+    return {"status": "passed" if ratio <= 1.05 else "failed", "median_ratio": ratio,
+            "scope": "sample p99 only; distribution peaks and sampling uncertainty require review"}
 
 
 def run_series(binary, config, output, repeat, smoke, platform_attested="off", profile=False):
@@ -177,7 +195,12 @@ def run_series(binary, config, output, repeat, smoke, platform_attested="off", p
             timeout = max(120, config["warmup"] + config["duration"] + 60)
             if config["program"] == "bench_shutdown_drain":
                 timeout += 2 * config["task-count"] * config["sleep-ms"] / 1000 / config["workers"]
-            r = execute(command, output / ("run-%02d" % index), timeout=timeout)
+            sample_path = output.resolve() / ("run-%02d.samples.tsv" % index)
+            child_env = os.environ.copy()
+            child_env.pop("MAGPIE_BENCH_SAMPLES_OUT", None)
+            if config["program"] == "bench_latency":
+                child_env["MAGPIE_BENCH_SAMPLES_OUT"] = str(sample_path)
+            r = execute(command, output / ("run-%02d" % index), timeout=timeout, env=child_env)
             parsed = list(csv.DictReader(io.StringIO(r.stdout), delimiter="\t"))
             if len(parsed) != 1 or parsed[0].get("config_hash") != manifest["config_hash"]:
                 raise RuntimeError("malformed benchmark TSV")
@@ -189,7 +212,10 @@ def run_series(binary, config, output, repeat, smoke, platform_attested="off", p
             if sha256(binary) != manifest["binary_sha256"]:
                 raise RuntimeError("benchmark binary changed during measurement")
             rows.append(row)
-            manifest["runs"].append({"index": index, "result": "passed", "stdout_sha256": sha256(output / ("run-%02d.stdout.txt" % index))})
+            run = {"index": index, "result": "passed", "stdout_sha256": sha256(output / ("run-%02d.stdout.txt" % index))}
+            if sample_path.exists():
+                run["samples_sha256"] = sha256(sample_path)
+            manifest["runs"].append(run)
             manifest_path.write_text(json.dumps(manifest, indent=2))
             print("%s %s %d/%d: %.0f total ops/s" % (config["program"], config["mode"], index + 1, repeat, float(row["total_ops_s"])), flush=True)
         with (output / "raw.tsv").open("w", newline="") as handle:
@@ -199,6 +225,12 @@ def run_series(binary, config, output, repeat, smoke, platform_attested="off", p
         (output / "summary.json").write_text(json.dumps(summarize(rows), indent=2))
         manifest["result"] = "passed"
         manifest["raw_sha256"] = sha256(output / "raw.tsv")
+        if config["program"] == "bench_latency":
+            manifest["p99_evidence"] = {
+                "exact_samples_archived": all("samples_sha256" in run for run in manifest["runs"]),
+                "sample_quantiles_available": compare_p99(rows, rows)["status"] == "passed",
+                "distribution_gate": "requires raw sample review; platform eligibility is not gate acceptance",
+            }
     except BaseException as error:
         manifest["result"] = "failed"
         manifest["error"] = str(error)
@@ -316,7 +348,8 @@ def replay(args):
     # Summaries are derived data. Recompute from the verified raw history
     # rather than trusting an editable summary file for the comparison.
     with (baseline / "initial/raw.tsv").open(newline="") as handle:
-        initial_summary = summarize(list(csv.DictReader(handle, delimiter="\t")))
+        initial_rows = list(csv.DictReader(handle, delimiter="\t"))
+        initial_summary = summarize(initial_rows)
     median = statistics.median(float(row["total_ops_s"]) for row in rows)
     reference = initial_summary["total_ops_s"]["median"]
     comparison = {"baseline_commit": metadata["baseline_commit"], "same_environment": same_environment,
@@ -324,6 +357,8 @@ def replay(args):
                   "baseline_binary_sha256": metadata["binary_sha256"], "median_ratio": median / reference if reference else None,
                   "formal_ab_eligible": bool(same_environment and same_day and current["formal_platform_eligible"] and initial["formal_platform_eligible"] and not initial.get("smoke", False)),
                   "interpretation": "baseline repeatability only; no new mechanism compared"}
+    if config["program"] == "bench_latency":
+        comparison["p99_sample_comparison"] = compare_p99(initial_rows, rows)
     (args.output / "comparison.json").write_text(json.dumps(comparison, indent=2))
 
 
@@ -371,6 +406,12 @@ def suite(args, base):
     if "bench_notify_scan" in help_text:
         for workers in (1, 4, 8):
             cases.append(("notify-%d" % workers, {"program": "bench_notify_scan", "workers": workers, "arrival-rate": 1000, "sample-stride": 1}))
+    if "--shutdown-pattern" in help_text:
+        for pattern, count in (("single-tail", 1), ("mixed", 16), ("caller-runs", 16)):
+            cases.append(("shutdown-" + pattern, {"program": "bench_shutdown_drain", "workers": 4,
+                         "capacity": 16, "task-count": count, "sleep-ms": 10,
+                         "shutdown-pattern": pattern,
+                         "rejection": "caller-runs" if pattern == "caller-runs" else "abort"}))
     manifest = args.output / "suite.json"
     try:
         for name, changes in cases:
@@ -378,7 +419,9 @@ def suite(args, base):
             if args.smoke:
                 config.update({"warmup": .01, "duration": .03, "sample-stride": 16})
                 if name.startswith("shutdown-"):
-                    config.update({"task-count": 32, "sleep-ms": .1})
+                    config["sleep-ms"] = .1
+                    if config.get("shutdown-pattern", "uniform") == "uniform":
+                        config["task-count"] = 32
             rows = run_series(args.binary.resolve(), config, args.output / name, args.repeat, args.smoke,
                               args.platform_attested, args.profile)
             inventory["cases"].append({"name": name, "result": "passed", "config_hash": config_hash(config)})

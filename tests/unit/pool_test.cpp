@@ -1,5 +1,6 @@
-#include <magpie/thread_pool.hpp>
+#include "../support/watchdog.hpp"
 #include <magpie/build_config.hpp>
+#include <magpie/thread_pool.hpp>
 #include <string_view>
 
 #if defined(MAGPIE_ENABLE_TEST_HOOKS)
@@ -398,6 +399,43 @@ TEST(ThreadPool, ShutdownGateRace) {
     pool.drain();
     EXPECT_EQ(ran.load(), 1);
     EXPECT_TRUE(shutdown_done.load(std::memory_order_acquire));
+}
+
+TEST(ThreadPool, GateZeroBeforeControllerWait) {
+    struct Race {
+        std::latch submit_seen{1}, release_submit{1}, controller_seen{1}, release_controller{1};
+        std::atomic<bool> waiting{false};
+        static void hook(magpie::detail::PoolTestHookPoint point, std::size_t,
+                         void *context) noexcept {
+            auto &s = *static_cast<Race *>(context);
+            using P = magpie::detail::PoolTestHookPoint;
+            if (point == P::SubmitAfterGate) {
+                s.submit_seen.count_down();
+                s.release_submit.wait();
+            }
+            if (point == P::ShutdownBeforeGateWait && !s.waiting.exchange(true)) {
+                s.controller_seen.count_down();
+                s.release_controller.wait();
+            }
+        }
+    } state;
+    magpie::detail::PoolTestHooks hooks{Race::hook, nullptr, &state};
+    HookInstall install(hooks);
+    magpie::test::Watchdog watchdog(
+        [&] { std::fprintf(stderr, "controller-before-gate-wait=%d\n", state.waiting.load()); });
+    magpie::ThreadPool pool(one_worker_options());
+    std::atomic<unsigned> executed{0};
+    std::thread submitter([&] { pool.submit([&] { ++executed; }); });
+    state.submit_seen.wait();
+    std::thread controller([&] { pool.shutdown(); });
+    state.controller_seen.wait();
+    state.release_submit.count_down();
+    submitter.join(); // The last gate decrement and notify precede atomic wait.
+    state.release_controller.count_down();
+    controller.join();
+    pool.drain();
+    EXPECT_EQ(executed.load(), 1U);
+    EXPECT_EQ(pool.stats().pending, 0U);
 }
 
 TEST(ThreadPool, DrainNotifyRace) {

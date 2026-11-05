@@ -59,3 +59,9 @@ python3 tools/model/run_event_count_models.py \
 固定 GenMC0.17.0/LLVM19.1.7，保存模型、相关生产源和runner身份。core 用C11 SC原子及抽象的compare/park/wake覆盖1/2/3 worker、两轮注册、notify_one/notify_all并发与shutdown；并发通知组合在单worker重注册场景，多worker场景主要检查关闭握手。generic投影把CAS与predicate放在同一个模拟mutex内，futex投影把CAS和内核窗口分开。R6缺少注册后stop重查、R5旧共享generation为指定断言负例。
 
 这不是Linux syscall运行，也不是完整C++对象或池级活性证明。模型的最终parked状态不能证明Task一定推进；M5全批迁移循环由实际池的执行项保留回归及变异负例守护。blocked单独记录，不作为活性成功。原生EAGAIN/EINTR/spurious、ABI和join后注册归零另由Linux测试验收，实际状态见 [M5 milestone](../../docs/milestones/M5.md)。
+
+2026-11-05 新增 `closing.c`：SC gate/stop、acquire pending 读取与 acq_rel 最终递减、drain mutex 停止配对、最终通知和注册后退出复查。单 worker 枚举停止与最终转换竞态；双 worker 枚举停止已经发布后的最终广播；两轮注册也在已停止情形枚举。双 worker 同时枚举整个停止竞态的首次运行超过 120s，原始超时保留，不能把分解后的投影称作该范围通过。负例分别删最终 pending/gate 通知、完整退出重查或 drain mutex 配对；未配对初稿实际找到反例并修复。
+
+`gate_wait.c` 用原子比较/停车边界抽象标准 atomic wait，检查两个控制等待者与最后离门通知，删除控制通知为负例；不模拟某个 stdlib 的 futex/锁实现或无限拒绝流。新增模型与原核心模型一同运行，结果和源码身份见 [M6 修复记录](../../docs/milestones/M6-review-fixes.md)。
+
+本机原工具缺失后在 `build/tools` 隔离构建了同一固定 GenMC commit 和 LLVM 19.1.7，未修改系统安装。官方包版本/SHA-256 与命令存入本机修复归档。该隔离工具及其 clang 子进程需要进程级 `LD_LIBRARY_PATH` 包含 `build/tools/llvm19-root/usr/lib/x86_64-linux-gnu` 和 `usr/lib/llvm-19/lib`；不修改全局环境。能力探针重新验证，不能将构建成功当作模型通过。

@@ -1,6 +1,6 @@
 # magpie 设计方案
 
-> 修订：2026-10-04，M5 审核修复。状态：**默认 mutex/global/CV；M3–M5 候选和本机验证已交付，Linux 原生及正式性能门禁待验收**。
+> 修订：2026-11-05。状态：**默认 mutex/global/CV；M5 原有 Linux futex 门禁已完成；M6 进行中，gate 2/7 开放、gate 4 本轮低载精确 p99 未通过。本轮恢复 CV 最后完整扫描，EventCount 新增关停停车及最终归零通知，验证见 M6 记录。**
 > [审核报告](review-2026-10-03.md) 保留旧版反例；[修复对照](review-fixes-2026-10-03.md) 记录逐项处置。旧版批量 CAS、overflow 与共享 futex 字协议全部撤回。
 
 ## 1. 文档目的与约束
@@ -51,7 +51,7 @@ magpie 是固定 worker 数的通用 C++20 工作窃取线程池，主要服务 
 
 **M1 当前实现边界：**调度只经过固定容量的全局 mutex ring，worker 按 FIFO 取任务；owner TLS 仅用于识别 worker 内满队列提交，并强制 inline fallback。M1 不创建本地 deque、MPMC queue 或 EventCount。worker 等待谓词由 queue mutex 保护的 condition_variable 握手；关闭中 worker 仍可停车等待 pending/gate 归零，不采用 M5 的每 worker WaitSlot/EventCount 注册协议。`DiscardOldest` 在同一个 queue mutex 临界区删除当前可取得的全局头并发布新任务；被移除 Task 在解锁并通知后销毁，因此其 capture destructor 不在队列锁内运行。该 mutex 基线避免 MPMC 中的 reservation retry 窗口，之后替换队列时仍须保留公共所有权和计数协议。
 
-**当前候选边界：**M4 使用 local→global bulk→随机单 victim 重复单项 steal，最后持 CV mutex 完整扫描再等待。M5 显式选择 EventCount，使用每 worker WaitSlot、64 次 cpu_relax 和 8 次 yield 后注册/完整扫描；Linux futex 和 generic 两个后端已实现，原生 Linux 门禁待验收。默认仍为 mutex/global/CV。见 [工作窃取说明](../docs/work-stealing.md) 和 [EventCount 说明](../docs/event-count.md)。
+**当前候选边界：**M4 使用 local→global bulk→随机 victim 重复单项 steal，最后持 CV mutex 完整扫描再等待。M5 显式选择 EventCount，默认 1024 次 cpu_relax、8 次 yield 后注册/完整扫描；generic/futex 原有门禁见 M5。本轮允许关停期等待，注册后复查完整退出谓词，pending/gate 最终归零各自通知。默认仍为 mutex/global/CV。见 [工作窃取说明](../docs/work-stealing.md) 和 [EventCount 说明](../docs/event-count.md)。
 
 旧 spill_lowest_half、overflow 缓冲、take_overflow、drain_spill_overflow 已删除。固定容量约束由 try_push 返回值表达，没有半批认领后的暂存或失败分区循环。
 
@@ -94,8 +94,10 @@ void ThreadPool::worker_loop(WorkerCtx& ctx) {
 Task* ThreadPool::block_on_eventcount(WorkerCtx& ctx) {
     const auto key = evc_.prepare_wait();
     evc_.enter(ctx.index);
-    // 注册后检查是关闭握手的一部分；不能只检查注册前 stopping。
-    if (stopping_.load(std::memory_order_seq_cst)) {
+    // 最终通知可能已经完成，必须在注册后复查完整退出谓词。
+    if (stopping_.load(std::memory_order_seq_cst) &&
+        in_flight_submitters_.load(std::memory_order_seq_cst) == 0 &&
+        pending_.load(std::memory_order_acquire) == 0) {
         evc_.leave(ctx.index);
         return nullptr;
     }
@@ -108,9 +110,9 @@ Task* ThreadPool::block_on_eventcount(WorkerCtx& ctx) {
 }
 ~~~
 
-spin/yield 只探测本地/全局，探测成功返回 Task*。acquire_ready 从全局或 victim 取得非空批次后保留一项、完成剩余项发布并返回保留项。上面骨架展示注册/停止顺序，省略 migrated 标志的传播：生产实现必须在注销后、run_one 前补发剩余项通知。关停期不重新阻塞，保留注册后的 stopping 检查防止晚注册睡过最终通知。
+spin/yield 只探测本地/全局，探测成功返回 Task*。acquire_ready 从全局或 victim 取得非空批次后保留一项、完成剩余项发布并返回保留项。上面骨架省略 migrated 标志的传播：生产实现必须在注销后、run_one 前补发剩余项通知。关停期无任务但尚有 pending/gate 时允许重新等待；注册后的完整退出检查覆盖最终通知早于注册的情况。
 
-shutdown 后有存量长任务时，其他 worker 暂时忙等。W2.8 以 bench_shutdown_drain 浪费 CPU 数据决定是否增加最终完成通知及关停期停车协议；新协议须重新证明 join 活性。
+2026-11-05：少量长尾任务触发 W2.8，pending/gate 在 stopping 后的 1→0 都广播 EventCount。先发布归零状态再通知，最后扫描与 epoch 复查不省略。新原语投影、真实池确定性交错与关停 CPU 对照分别验证，不能把历史 M5 证据当作新协议证明。
 
 ## 6. 公开 API
 
@@ -581,13 +583,18 @@ Linux futex 和 generic 必须同套语义测试，Linux 另测真实 syscall �
 // design-fragment: pending
 void ThreadPool::dec_pending() noexcept {
     if (pending_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-        std::lock_guard<std::mutex> lk(drain_mtx_);
-        drain_cv_.notify_all();
+        bool notify_workers;
+        {
+            std::lock_guard<std::mutex> lk(drain_mtx_);
+            drain_cv_.notify_all();
+            notify_workers = stopping_.load(std::memory_order_seq_cst);
+        }
+        if (notify_workers) evc_.notify_all();
     }
 }
 ~~~
 
-pending++ 在队列发布/CallerRuns 前；执行、丢弃、拒绝回退全部走 dec_pending。1→0 的持锁通知与 drain 谓词等待配对。pending 也包含已计数但尚未决定接受的提交，不是队列深度。
+pending++ 在队列发布/CallerRuns 前；执行、丢弃、拒绝回退全部走 dec_pending。1→0 的持锁通知与 drain 谓词等待配对，停止检查也在该锁内完成；shutdown 用同一锁发布 stopping，解锁后才广播。这样最终完成选择不通知时，其零值经 mutex→停止通知 epoch 对晚注册者可见；仅有 SC stopping load/store 不足以传递另一个原子上的 acq_rel pending 写入。以上为 EventCount 骨架；CV 变体另持停车 mutex 广播。pending 不是队列深度。
 
 ### 8.3 任务执行与重入
 
@@ -615,11 +622,11 @@ ExecutionFrame 链随 RAII 压入/恢复，所有嵌套帧都参与 require_exte
 
 先 require_external_control（遍历本池执行帧，失败抛 logic_error），再按顺序：
 
-1. stopping.store(true,SC)。
-2. 自旋/yield 等 in_flight_submitters.load(SC)==0；等待包括已过门 CallerRuns。
-3. evc.notify_all()。
+1. 持 drain_mtx 执行 stopping.store(true,SC)，与最终 pending 检查配对，再释放 drain 锁。CV 变体外层还持停车 mutex；完成线程不同时持 drain/停车锁，避免锁序环。
+2. 立即 evc.notify_all()，唤醒已有注册者重查关闭状态。
+3. 用 atomic wait 等待 in_flight_submitters.load(SC)==0；包括已过门 CallerRuns。停止后的最后离门先 notify_all 控制等待者，再广播 worker。wait 前的值复查覆盖归零通知已经完成的窗口；持续拒绝流仍无有界返回保证。
 
-以上是目标 EventCount 协议。M1 mutex 变体在同一个 queue mutex 下写入 worker stopping 谓词并通知 queue condition_variable；worker 仅在 stopping、提交门为零、pending 为零同时成立时退出。stopping 时 Gate 的 1→0 与 pending 的 1→0 也在持 queue mutex 时广播；正常运行期间这两个归零转换不广播，任务发布仍只通知一个 worker。该变体允许关闭期停车，不等同于 EventCount 的注册/唤醒握手。M3/M4 MPMC 候选保留该停车协议：worker 常态先无停车锁 dequeue，失败后持锁再次 dequeue/退出裁决；producer seq 发布后取得同一 mutex 再通知，确保 reservation-hole 恢复不会落入探测到 wait 的丢唤醒窗口。
+EventCount 在 stopping 后的 Gate 1→0 与 pending 1→0 分别广播。正常运行期间这两个归零转换不广播，成功发布仍逐次通知。M1/M3/M4 CV 变体在同一个 queue mutex 下写 stopping/通知，并在 Gate 或 pending 最终归零时持该锁广播。M3 最后 dequeue、M4 最后 local/global/全 victim 扫描都在停车锁内，与发布者的持锁通知配对。2026-10-12 锁外全扫描加锁内 local/global 轻查方案已于 2026-11-05 撤回：victim 可在锁外扫描后完成发布和通知，单靠锁内轻查会丢醒。锁内扫描的生产者等待成本保留为待测取舍，未来 generation 方案须单独论证。
 
 允许多个外部线程调用，重复通知无害。停止后所有 submit 都被拒，包含已有任务再提交子项。任务须自行处理 ShuttingDown。已接受任务仍执行完。
 
@@ -630,6 +637,8 @@ ExecutionFrame 链随 RAII 压入/恢复，所有嵌套帧都参与 require_exte
 按 stopping SC → 门 SC 为零 → pending acquire 为零裁决。所有过门提交在 Gate 内计数/发布/执行，读到停止和门零后不会再接受任务；pending 零表示存量清空。后来的拒绝提交不改 pending。
 
 M1 的 condition_variable worker 谓词还将 gate==0 纳入退出条件，避免 worker 在提交者已通过 stop 检查、尚未执行 pending++ 时退出。Gate 1→0 在 stopping 已置位时持 queue mutex 再广播，覆盖这个窗口；pending 1→0 在同一锁上广播以唤醒仍有其他 worker task 的停机 worker。
+
+EventCount 注册后按相同完整谓词裁决。最终归零早于注册时由退出检查拦截；晚于检查时由对应 epoch 推进或 Signaled 标记拦截。即使 pending 一直为零，拒绝提交的 capture 析构仍可能持 gate，故 gate 广播不能由 pending 广播代替。
 
 ### 9.3 drain
 
@@ -881,12 +890,12 @@ W1：mutex 基线先落实 API/所有权/执行上下文/提交门/pending/关�
 ## 18. 文档状态
 
 - [ADR-001](chase-lev-deque-adr.md)：v2.1，单项协议与池层 fallback，M4 候选已实现、正式门禁待关闭。
-- [ADR-002](event-count-adr.md)：v3.0，每 worker 停车字与注册后 stop，待实现与模型检查。
-- [ADR-003](mpmc-queue-adr.md)：v2.0，载荷类型/弱 try 契约/进度边界，待实现验证。
+- [ADR-002](event-count-adr.md)：v3.2，每 worker 停车字、完整退出复查及关停归零通知；本轮验证见 M6。
+- [ADR-003](mpmc-queue-adr.md)：载荷类型/弱 try 契约已实现，原始证据见 M3。
 - [test-plan](test-plan.md)：正式用例名称、M1 已执行测试及后续原语门禁。
-- [benchmark-plan](benchmark-plan.md)：审核修订版，暂无实测数据。
+- [benchmark-plan](benchmark-plan.md)：已有历史测量，本轮补精确分位数、关闭长尾与归因边界。
 - [审核报告](review-2026-10-03.md)：历史发现，原行号对应修订前内容。
 - [修复对照](review-fixes-2026-10-03.md)：逐项修复与有限验证记录。
-- [实施步骤与里程碑](implementation-plan.md)：M0–M7 交付、依赖与验收门禁；M0 待 Linux CI，M1 mutex 基线已完成本机门禁，Linux backend 验收待 CI，M2–M7 未开始。
+- [实施步骤与里程碑](implementation-plan.md)：M0–M7 交付与证据边界；M6 进行中，M7 未开始，远端 CI/ARM64 等待独立证据。
 
 许可证沿用仓库现有 LICENSE，README 作为 W1 交付物补齐。无实测结果时不能以“已接受”表述并发正确性或性能已验收。

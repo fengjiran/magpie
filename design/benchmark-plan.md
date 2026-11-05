@@ -1,6 +1,6 @@
 # benchmark-plan：资源固定、路径分离与性能归因
 
-- 状态：**2026-10-03：M2 mutex harness、本机三变体 smoke 与代表配置开发冻结/同日重跑已完成；完整矩阵与正式基线待固定物理 Linux。**
+- 状态：**2026-11-05：已有 M2–M6 历史测量；M6 进行中，gate 2/7 开放，gate 4 本轮低载精确 p99 未通过。本轮见 M6-review-fixes；物理 Linux/ARM64 不由本机 WSL2 数据替代。**
 - 上位：[magpie设计方案.md](magpie设计方案.md) §13/§14/§16。
 - 修订：区分worker执行、本地spawn、外部全局提交及CallerRuns；采集提交门、epoch和WaitSlot扫描；删除半批overflow/TSC相关观测。
 
@@ -14,7 +14,7 @@
 
 | 项 | 要求 |
 |---|---|
-| 机器 | 固定物理 Linux；WSL/macOS 仅开发趋势，不能作为最终 futex 验收（2026-10-11 用户裁定 WSL2 固定环境升级为 M6 验收证据，见下） |
+| 机器 | 固定 Linux 环境；2026-10-11 已登记 WSL2 为 M6 环境，见下；macOS 仅开发趋势，物理 Linux 复查另列 |
 | CPU | 记录CPU型号、核/SMT、允许CPU集合、容器quota、NUMA、频率策略 |
 | 绑核 | driver/producer和worker使用明确集合；比较版本使用同一集合 |
 | 资源 | 对比固定producer数及CPU预算；CallerRuns不能额外计入worker scaling |
@@ -22,7 +22,7 @@
 | 重复 | 每配置≥5独立进程，预热≥2s、测量≥10s，中位数/IQR |
 | 归因 | gate、pending、submitted、epoch、waiters、cursor、扫描槽、slot seq、alloc均采样 |
 
-最终物理机尚待安排；没有数据时不关闭主设计§14.1门禁。
+物理 Linux 复查尚待安排；M6 已登记环境的各项门槛独立判定，缺证据不关闭。
 
 **2026-10-11 机器裁定（M6）：** 无物理 Linux 可安排，用户明确裁定：本机 WSL2（Linux 6.18.40.1-microsoft-standard-WSL2、x86_64、20 vCPU）的固定环境数据可作为 M6 六项门槛的验收证据，登记理由与风险如下，并同步 [platform-matrix](../docs/platform-matrix.md) 与主设计 §14.1：
 
@@ -70,7 +70,7 @@ BULK_LIMIT {1,4,16,32,64,128}、STEAL_CAP {1,4,16,32,64,128}、SPIN {0,16,64,256
 
 ## 6. harness
 
-自研轻量harness支持warmup、duration、seed、repeat、到达速率、资源集合；不把“约200行”当实现限制。固定桶时延直方图（1μs~1s，对数64桶）应报告分辨率/溢出桶，不声称比桶宽更精确的p99。
+自研轻量 harness 支持 warmup、duration、seed、repeat、到达速率和资源集合。保留 64 桶的 `*_us_upper` 分布概览，但不能用桶上界之比证明 5% 回退；正式 p99 使用窗口结束后从有效 Sample 计算的 nearest-rank 分位数，并归档纳秒样本、采样率和数量。精确样本值不代表没有估计误差。旧数据缺精确列时待补证，不能重命名上界冒充精确值。
 
 避免benchmark自己共享一个热原子吞吐计数器；任务记录按线程预分配、末端聚合。driver不能隐式帮执行future任务。任务规模足够且测量窗口固定，短样本不作结论。
 
@@ -84,7 +84,7 @@ M2 当前程序、TSV 口径、资源控制、独立源码 commit/bundle、binar
 
 W1.7冻结基线；W2.2提交/producer路径；W2.4worker scaling/skew/fallback；W2.6六项与WaitSlot扫描；W2.7每条内存序放宽独立数据与模型/ARM64；W2.9槽布局对照；W2.10通知成本与重证；W2.8关闭CPU浪费。
 
-关停停车候选触发：退出窗口纯忙等CPU·秒大于任务有效CPU·秒的50%。将sleep wall time当有效CPU工作会错误归因，因此必须同时报告任务thread CPU time与wall time。
+关停停车候选触发：退出窗口纯忙等 CPU·秒大于任务有效 CPU·秒的 50%。同时覆盖 task_count<workers、single-tail、mixed、CallerRuns 在途提交，不用均匀足量存量排除长尾风险。process CPU−task CPU 只是包含调度成本的上界，不能称纯忙等实测；CallerRuns task CPU 涉及 shutdown 窗口，分子分母须保持窗口一致。2026-11-05 单长尾机制证据已触发候选，协议/对照见 M6 修复记录。
 
 ## 8. 易错解释
 

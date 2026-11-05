@@ -1,6 +1,6 @@
 # ADR-002：EventCount——每 worker 等待状态字与关闭握手
 
-- 状态：**M5 候选已实现；generic 与有限 RC11 验证已运行，Linux 原生门禁待验收（v3.1，2026-10-04）**。实际记录见 [M5](../docs/milestones/M5.md)。
+- 状态：**v3.2，2026-11-05：M5 原有 Linux/generic 门禁已完成；本轮增加关停停车、完整退出复查及 pending/gate 最终通知，验证见 [M6 修复记录](../docs/milestones/M6-review-fixes.md)。** 历史原生证据见 [M5](../docs/milestones/M5.md)。
 - 上位约束：[magpie设计方案.md](magpie设计方案.md) §5.3、§7.3、§9。
 - 依据：[审核报告](review-2026-10-03.md) R5/R6。撤回 v2.x 共享睡眠字证明；generic 的额外 mutex 不能替 Linux 版作证。
 
@@ -27,7 +27,7 @@ word 是 uint32_t 状态 Idle=0、Waiting=1、Signaled=2，**不是 epoch 低 32
 ```text
 W1 key = epoch.load(SC)
 W2 waiters.fetch_add(1,SC)，本 worker word.store(Waiting,SC)
-W3 stopping.load(SC) 为 true → leave 并返回
+W3 stopping.load(SC) && gate.load(SC)==0 && pending.load(acquire)==0 → leave 并退出
 W4 本地/全局/全 victim 最后探测；只认领，不执行用户代码
    命中 → leave；返回主循环后再执行
 W5 epoch.load(SC) != key → leave 并返回重扫
@@ -38,9 +38,13 @@ N1 epoch.fetch_add(1,SC)（上限前 fail-fast；无条件、先于闸门）
 N2 notify_one 读 waiters(SC)，0 则返回
 N3 扫描 slot，CAS Waiting→Signaled(SC)
 N4 对成功标记槽发 wake；one 结束，all 继续
+
+C1 shutdown 持 drain mutex 发布 stopping(SC)，解锁后立即 notify_all
+C2 pending.fetch_sub(acq_rel) 的 1→0，持现有 drain mutex 检查 stopping(SC)，解锁后按结果 notify_all
+C3 gate.fetch_sub(SC) 的 1→0，若 stopping(SC) 则 gate.notify_all（控制线程）和 EventCount.notify_all（worker）
 ```
 
-每 worker 不嵌套注册；命中、停止、epoch 变化、EAGAIN/EINTR、spurious 均配平注册数。通知只要求重扫，不代表任务所有权。入队发布先于通知；不能先执行可能阻塞的用户代码再补通知。
+每 worker 不嵌套注册；命中、完整退出、epoch 变化、EAGAIN/EINTR、spurious 均配平注册数。停止后仍有 pending/gate 时可等待。通知只要求重扫，不代表任务所有权。入队发布先于通知；不能先执行可能阻塞的用户代码再补通知。C2 在 drain mutex 解锁后执行，注册期间仍不得通知或运行用户代码。
 
 ## 4. 正确性依据与证明义务
 
@@ -60,11 +64,17 @@ N2 读 0 时，无尚未注销的注册计数在它之前。计数++/Waiting 发
 
 ### 4.3 关闭
 
-stop 在 W3 前：注册后的停止检查拦截，即使 key 已包含 shutdown 的 epoch。
+worker 按 stopping SC → gate SC 为零 → pending acquire 为零裁决退出。若仍有执行任务或在途提交，停止后的 worker 可重新停车，最后一次归零必须唤醒它。
 
-stop 在 W3 后：W5 若在 shutdown N1 后则 epoch 变化；否则该注册的 Waiting 在 N1 前已发布，notify_all 的逐槽 CAS 或注销覆盖它。尚未入内核也由 Signaled 比较拦截。
+最终状态/通知在 W3 前：注册后的完整退出检查拦截，即使 key 已包含最终 epoch。最终状态在 W3 后：W5 若读取到最终通知或其后继 epoch 则不阻塞；否则 Waiting 已发布，由对应 notify_all 的 CAS 或注销覆盖。尚未入内核则 Signaled 使比较失败。
 
-构造失败也 store stopping → notify_all → join。独立的停止前置检查只能作提示，不能承担唯一关闭保障。
+pending 与 gate 必须分别通知。拒绝提交的 capture 析构可以持 gate 而从未增加 pending；CallerRuns 也可能先 pending 归零再离门。只补其中一种通知不足以保证 join。
+
+C1/C2 还必须用同一个 drain mutex 配对。若最终 pending 写零后读到 stopping=false，随后 C1 取得该 mutex，写零经 mutex happens-before 进入 C1 的 epoch 发布，晚注册者才能排除旧 pending；若 C1 先取得锁，则 C2 必见 stopping=true 并补通知。单靠 SC stopping 的总序无法把另一个 acq_rel pending 的写入传递给晚注册者。首次 closing 模型实际找到了这个反例，不能用 x86 原生测试通过代替该证明。gate 的修改与退出读取均为 SC，C3 的停止检查不额外取 drain mutex。
+
+构造失败仍 store stopping → notify_all → join，此时 gate/pending 为零。注册后的完整退出检查仍是必要步骤，不能只依赖注册前提示。连续拒绝流、永久阻塞用户任务或线程不被调度不承诺有界退出。
+
+同步 shutdown 对非零 gate 调用 C++20 atomic wait，醒后重新 load(SC) 裁决零；标准 wait 的值检查覆盖通知先于阻塞。控制等待者与 worker 使用不同停车对象，C3 两种通知不可互相替代。gate_wait.c 抽象标准库的原子比较/停车边界，覆盖两个控制等待者，不宣称验证具体标准库实现或连续拒绝流的 ABA 活性。
 
 ### 4.4 可见性与有限状态
 
@@ -87,6 +97,8 @@ generic：每槽独立 mutex+condition_variable。等待持该 mutex 调用 cv.w
 ## 6. 测试与性能
 
 必测：SeparateWaitWords、WakeBeforeKernelWait、ShutdownBeforeRegistration、ShutdownAfterRegisteredCheck、ConcurrentNotifyRegistration、RegistrationBalanced、EpochLimit、SpuriousWake、GenericPredicateHandshake、SpawnWhileIdleWakeup。
+
+v3.2 补 FinalPendingZeroWakesClosingWorker、FinalPendingZeroBeforeKernelWait、FinalGateZeroWakesClosingWorkerWithoutPending；测试在额外 shutdown/析构前等待全部 worker 退出，防止收尾通知掩盖缺陷。closing.c 投影覆盖 pending/gate 最终转换与晚注册，分别删除 pending 通知、gate 通知、退出重查以及 C1/C2 的 mutex 配对作指定反例；范围与结果见 M6 修复记录。
 
 缝：前置 stop 检查后、注册计数++后、W3 后、W5 后/W6 前、通知 CAS 后/wake 前。强制旧方案丢醒调度，不以随机压测替代。
 

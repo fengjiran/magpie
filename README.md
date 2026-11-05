@@ -4,7 +4,7 @@ magpie 是一个面向 C++20 的固定 worker 工作窃取线程池。默认采�
 
 ## 开发构建
 
-需要 CMake 3.21 或更新版本，以及支持所需 C++20 标准库特性的编译器。工程检查 GCC 11+、Clang 14+、AppleClang 14+ 和 MSVC 19.34+；最低版本是配置检查边界，平台/编译器组合仍以 CI 和后续门禁的实际结果为准。Linux 与 macOS 是当前开发验证平台；Windows/MSVC 配置仅提供基础分支，尚未由 CI 或本机验证。多配置生成器（如 Visual Studio）通过 target compile definition 记录实际的 Debug/Release 配置。
+需要 CMake 3.21 或更新版本，以及支持所需 C++20 标准库特性（含 atomic wait/notify）的编译器。工程检查 GCC 11+、Clang 14+、AppleClang 14+ 和 MSVC 19.34+；最低版本是配置检查边界，平台/编译器组合仍以 CI 和后续门禁的实际结果为准。Linux 与 macOS 是当前开发验证平台；Windows/MSVC 配置仅提供基础分支，尚未由 CI 或本机验证。多配置生成器（如 Visual Studio）通过 target compile definition 记录实际的 Debug/Release 配置。
 
 ```sh
 cmake --preset release

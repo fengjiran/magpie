@@ -1,7 +1,7 @@
 # magpie 实施步骤与里程碑
 
-- 日期：2026-10-03。
-- 状态：**M0 待 Linux CI；M1 mutex 底座已通过本机验证、待平台/测试收口；M2 工程与本机开发冻结/同日重跑已完成、待物理 Linux 完整验收；M3/M4 候选及本机验证已完成、正式门禁待关闭；M5 EventCount 已通过 macOS generic 回归与 Linux（WSL2）原生 futex 门禁并标记完成，证据见 M5 记录；M6 已标记完成但 T8/T1 环境修订已于 2026-10-12 撤销（归因待重做）并新增 gate 7（多 worker 亚微秒扩展，未关闭），详见 [M6 milestone](../docs/milestones/M6.md)；M7 未开始**。
+- 日期：2026-11-05（当前修订，历史里程碑日期保留）。
+- 状态：**M0 待 Linux CI；M1 mutex 底座已通过本机验证、待平台/测试收口；M2 工程与本机开发冻结/同日重跑已完成、待物理 Linux 完整验收；M3/M4 候选及本机验证已完成、正式门禁待关闭；M5 EventCount 已通过 macOS generic 回归与 Linux（WSL2）原生 futex 门禁并标记完成，证据见 M5 记录；M6 进行中，gate 2/7 开放、gate 4 本轮低载精确 p99 未通过，2026-11-05 修复记录见 M6-review-fixes，详见 [M6 milestone](../docs/milestones/M6.md)；M7 未开始**。
 - 范围：实施当前审核修订版线程池，形成正确性证据、冻结基线和首版交付。M1 尚无 Linux pthread backend 原生验收；完整证据见 [M1 milestone](../docs/milestones/M1.md)。
 - 上位约束：[主设计](magpie设计方案.md)、[逐项修复对照](review-fixes-2026-10-03.md)、[测试计划](test-plan.md)、[benchmark 计划](benchmark-plan.md)。
 
@@ -274,4 +274,4 @@ flowchart LR
 
 ## 13. 当前可执行的下一步
 
-当前可执行下一步是为 M1 运行 Linux CI，并复核 pthread stack/affinity fallback。该平台门禁通过后再进入 M2 冻结 mutex 基线；当前没有必要扩充 NUMA、任务图或自定义 future。实施过程中以这份计划组织交付，以主设计和三个 ADR 决定协议，以测试和性能证据判定是否进入下一里程碑。
+当前审核修复及测量已完成；下一步根据共享元数据/运行期退避的剖析，独立优化 gate 2/4/7，不能只针对迁移通知预定结论；参见 [M6 审核修复记录](../docs/milestones/M6-review-fixes.md)。远端 Linux CI、ARM64 和物理机复查仍分别待证，不能把历史 M1 下一步当作当前进度。按主设计/ADR 的协议和实际门禁决定是否进入 M7，不扩充 NUMA、任务图或自定义 future。

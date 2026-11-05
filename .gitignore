@@ -1,6 +1,7 @@
 /build/
 /.cache/
 /results/
+/magpie_bench
 __pycache__/
 .trae/
 .DS_Store

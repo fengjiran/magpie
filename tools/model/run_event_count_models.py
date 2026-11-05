@@ -15,7 +15,7 @@ def main():
     version=subprocess.run([args.genmc,'--version'],capture_output=True,text=True,check=True).stdout
     if 'GenMC v0.17.0 ' not in version or 'LLVM 19.1.7' not in version:
         raise RuntimeError('requires pinned GenMC0.17.0/LLVM19.1.7: '+version)
-    sources=[ROOT/'tools/model/event_count/core.c',ROOT/'tools/model/event_count/separate_words.c',ROOT/'src/event_count.hpp',ROOT/'src/event_count.cpp',ROOT/'src/event_count_generic.cpp',ROOT/'src/event_count_linux.cpp',ROOT/'src/thread_pool.cpp',Path(__file__).resolve()]
+    sources=[ROOT/'tools/model/event_count/core.c',ROOT/'tools/model/event_count/separate_words.c',ROOT/'tools/model/event_count/closing.c',ROOT/'tools/model/event_count/gate_wait.c',ROOT/'src/event_count.hpp',ROOT/'src/event_count.cpp',ROOT/'src/event_count_generic.cpp',ROOT/'src/event_count_linux.cpp',ROOT/'src/thread_pool.cpp',Path(__file__).resolve()]
     for source in sources:
         (args.output_dir/(source.name+".source")).write_bytes(source.read_bytes())
     report={'version':version,'memory_model':'RC11','scope':'C11 SC EventCount plus abstract atomic compare-park/wake; bounded safety, not native syscall or full liveness proof','source_sha256':{str(s.relative_to(ROOT)):hashlib.sha256(s.read_bytes()).hexdigest() for s in sources},'runs':[],'result':'running'}
@@ -27,11 +27,24 @@ def main():
            ('three-workers',sources[0],['-DWORKERS=3','-DSINGLE_NOTIFIER'],False),
            ('missing-stop-recheck',sources[0],['-DWORKERS=1','-DOMIT_STOP_RECHECK'],True),
            ('separate-words',sources[1],[],False),
-           ('shared-generation',sources[1],['-DSHARED_GENERATION'],True)]
+           ('shared-generation',sources[1],['-DSHARED_GENERATION'],True),
+           ('closing-pending-two-workers',sources[2],['-DPENDING_ONLY','-DWORKERS=2','-DALREADY_STOPPED'],False),
+           ('closing-gate-two-workers',sources[2],['-DGATE_ONLY','-DWORKERS=2','-DALREADY_STOPPED'],False),
+           ('closing-inline',sources[2],[],False),
+           ('closing-queued',sources[2],['-DGATE_FIRST'],False),
+           ('closing-reregister',sources[2],['-DROUNDS=2','-DALREADY_STOPPED'],False),
+           ('generic-closing-inline',sources[2],['-DGENERIC'],False),
+           ('generic-closing-queued',sources[2],['-DGENERIC','-DGATE_FIRST'],False),
+           ('missing-final-pending-notify',sources[2],['-DPENDING_ONLY','-DOMIT_PENDING_NOTIFY'],True),
+           ('missing-final-gate-notify',sources[2],['-DGATE_ONLY','-DOMIT_GATE_NOTIFY'],True),
+           ('missing-closing-exit-recheck',sources[2],['-DOMIT_EXIT_RECHECK'],True)]
+    cases.append(('unpaired-final-pending-stop',sources[2],['-DPENDING_ONLY','-DOMIT_STOP_MUTEX'],True))
+    cases.extend([('two-gate-controllers',sources[3],[],False),
+                  ('missing-controller-notify',sources[3],['-DOMIT_CONTROLLER_NOTIFY'],True)])
     try:
         for name,source,flags,negative in cases:
             graph=args.output_dir/(name+'.dot')
-            cmd=[args.genmc,'-rc11','-disable-estimation','-print-error-trace','-dump-error-graph='+str(graph),'--']+flags+[str(source)]
+            cmd=[args.genmc,'-rc11','-disable-mm-detector','-disable-estimation','-print-error-trace','-dump-error-graph='+str(graph),'--']+flags+[str(source)]
             command_file=args.output_dir/(name+'.command.json')
             command_file.write_text(json.dumps({'command':cmd,'result':'running'},indent=2))
             try:

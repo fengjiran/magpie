@@ -89,6 +89,8 @@ enum class HookPoint {
     EventSignalBeforeWake,
     EventAfterLeave,
     EventAfterBackendReturn,
+    CvAfterProbeBeforeParkLock,
+    ShutdownBeforeGateWait,
 };
 #endif
 
@@ -469,16 +471,21 @@ struct ThreadPool::Impl {
         }
 
         MAGPIE_TEST_HOOK(PendingZeroBeforeDrainLock, 0);
+        bool notify_workers;
         {
             std::lock_guard<std::mutex> lock(drain_mutex);
             drain_cv.notify_all();
+            // Pair with stopping's publication under this existing mutex.
+            // Otherwise both the final completer and a closing waiter may
+            // miss each other's state even though stopping itself is SC.
+            notify_workers = stopping.load(std::memory_order_seq_cst);
         }
+        if (notify_workers) {
 #if !defined(MAGPIE_USE_EVENT_COUNT)
-        if (stopping.load(std::memory_order_seq_cst)) {
             std::lock_guard<std::mutex> lock(queue_mutex);
+#endif
             notify_queue_all();
         }
-#endif
     }
 
     void submit(Task* task) {
@@ -635,12 +642,13 @@ struct ThreadPool::Impl {
             std::fprintf(stderr, "magpie: submission gate underflow\n");
             std::terminate();
         }
-#if !defined(MAGPIE_USE_EVENT_COUNT)
         if (old == 1 && stopping.load(std::memory_order_seq_cst)) {
+            in_flight_submitters.notify_all();
+#if !defined(MAGPIE_USE_EVENT_COUNT)
             std::lock_guard<std::mutex> lock(queue_mutex);
+#endif
             notify_queue_all();
         }
-#endif
     }
 
     struct GateGuard {
@@ -674,8 +682,10 @@ struct ThreadPool::Impl {
         require_external_control(owner);
         publish_worker_stop();
         MAGPIE_TEST_HOOK(ShutdownAfterStop, 0);
-        while (in_flight_submitters.load(std::memory_order_seq_cst) != 0) {
-            std::this_thread::yield();
+        for (auto active = in_flight_submitters.load(std::memory_order_seq_cst); active != 0;
+             active = in_flight_submitters.load(std::memory_order_seq_cst)) {
+            MAGPIE_TEST_HOOK(ShutdownBeforeGateWait, 0);
+            in_flight_submitters.wait(active, std::memory_order_seq_cst);
         }
     }
 
@@ -683,7 +693,10 @@ struct ThreadPool::Impl {
 #if !defined(MAGPIE_USE_EVENT_COUNT)
         std::lock_guard<std::mutex> lock(queue_mutex);
 #endif
-        stopping.store(true, std::memory_order_seq_cst);
+        {
+            std::lock_guard<std::mutex> lock(drain_mutex);
+            stopping.store(true, std::memory_order_seq_cst);
+        }
         notify_queue_all();
     }
 
@@ -721,8 +734,18 @@ struct ThreadPool::Impl {
         notify_queue_one();
     }
     Task* transfer_batch(WorkerCtx& context, std::size_t count, bool& migrated) noexcept {
-        // Keep one successful claim private: republishing every item lets two
-        // workers repeatedly steal the whole batch without executing anything.
+        // 剩余项全部回推至窃取者自己的本地 deque，推入失败 terminate。
+        // 容量证明依赖三条不变量，缺一即失效（2.1 核实）：
+        //  1. 批量领取前本地 pop() 空（pop 返回 nullptr ⟹ deque 空，含最后项
+        //     CAS 失败 bottom 恢复 b+1 的守恒分支）；
+        //  2. 领取量按本地容量钳制（min(BULK_LIMIT, local.capacity())），
+        //     故 count−1 ≤ capacity−1；
+        //  3. acquire_ready 内不运行用户代码、只有 owner 能 push 自己的
+        //     deque（非 owner 提交走全局），接收期间无重入。
+        // 若未来在 acquire_ready 中插入回调、允许非 owner push 或放宽 pop
+        // 语义，必须同步更新此证明，否则此处会从「可证明的失败」退化为
+        // 生产环境 terminate。活性说明：保留一项独占执行，避免两 worker
+        // 反复转移整批而不执行任何任务。
         auto* task = context.batch[0];
         context.batch[0] = nullptr;
         for (std::size_t i = count; i > 1; --i) {
@@ -813,15 +836,15 @@ struct ThreadPool::Impl {
                 task = acquire_ready(context, false, migrated, false);
             }
             if (!task) {
-                // A pre-registration stop check is only a hint. The second
-                // check after enter closes shutdown's late-registration race.
-                if (stopping.load(std::memory_order_seq_cst)) { continue; }
                 MAGPIE_TEST_HOOK(BeforeEventPrepare, context.index);
                 const auto key = event_count.prepare_wait();
                 event_count.enter(context.index);
-                if (stopping.load(std::memory_order_seq_cst)) {
+                // Terminal pending/gate transitions also notify. Rechecking
+                // the full exit predicate after registration covers a final
+                // notification completed before this worker's registration.
+                if (can_exit()) {
                     event_count.leave(context.index);
-                    continue;
+                    return;
                 }
                 MAGPIE_TEST_HOOK(AfterEventStopCheck, context.index);
                 task = acquire_ready(context, true, migrated);
@@ -852,8 +875,12 @@ struct ThreadPool::Impl {
             bool migrated = false;
             task = acquire_ready(context, false, migrated);
             if (!task) {
+                MAGPIE_TEST_HOOK(CvAfterProbeBeforeParkLock, context.index);
                 std::unique_lock<std::mutex> lock(queue_mutex);
                 for (;;) {
+                    // Publication may have completed its notification after
+                    // the unlocked probe. Include victims in the final check
+                    // paired with wait, not only this worker's local/global.
                     task = acquire_ready(context, true, migrated);
                     if (task || can_exit()) {
                         break;
@@ -998,7 +1025,9 @@ struct ThreadPool::Impl {
     alignas(MAGPIE_CACHE_LINE) std::atomic<bool> stopping{false};
     alignas(MAGPIE_CACHE_LINE) std::atomic<std::uint64_t> in_flight_submitters{0};
     alignas(MAGPIE_CACHE_LINE) std::atomic<std::uint64_t> pending{0};
-    std::mutex drain_mutex;
+    // Align the following region too: alignas(pending) alone permits a mutex
+    // to occupy the unused bytes of pending's configured cache line.
+    alignas(MAGPIE_CACHE_LINE) std::mutex drain_mutex;
     std::condition_variable drain_cv;
     struct alignas(MAGPIE_CACHE_LINE) SubmitLine {
         std::atomic<std::uint64_t> submitted{0};
@@ -1009,7 +1038,7 @@ struct ThreadPool::Impl {
 #if !defined(MAGPIE_USE_EVENT_COUNT)
     alignas(MAGPIE_CACHE_LINE) std::atomic<std::uint64_t> wakes{0};
 #endif
-    HandlerHolder handler;
+    alignas(MAGPIE_CACHE_LINE) HandlerHolder handler;
 };
 
 QueueFullError::QueueFullError(QueueFullReason error_reason)

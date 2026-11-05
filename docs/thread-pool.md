@@ -46,4 +46,4 @@ M3 可通过构建选项选择全局 MPMC 候选，默认仍 mutex。候选的 Q
 
 M4 opt-in 工作窃取候选已接入本地 deque，公共契约沿用此基线；owner 提交、容量与 CV 通知握手的差异见 [工作窃取说明](work-stealing.md)。默认构建仍为 mutex。
 
-M5 可在工作窃取候选上选择 EventCount。它使用独立 WaitSlot 和 epoch 通知，关闭期不重新停车，长任务期间其他 worker 可能忙等；统计不能把 backend 返回当作实际内核唤醒。配置、统计和原生验收边界见 [EventCount 说明](event-count.md)。
+M5 可在工作窃取候选上选择 EventCount。它使用独立 WaitSlot 和 epoch 通知；2026-11-05 起，关停期允许等待，以最终 pending/gate 通知和注册后完整退出复查保证进度。统计不能把 backend 返回当作实际内核唤醒。配置、统计和原生验收边界见 [EventCount 说明](event-count.md)。

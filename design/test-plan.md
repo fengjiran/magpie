@@ -1,6 +1,6 @@
 # test-plan：单元、确定性交错与池级验证
 
-- 状态：**M1–M6适用本机测试已实施并获证据；M5 Linux futex 门禁（2026-10-11，WSL2）与 M6 性能门禁（2026-10-11，WSL2，两项门槛环境修订）已完成；ARM64 门禁与 M7 release 用例仍待执行；实际证据见各milestone**。
+- 状态：**M5 原有 Linux futex 门禁已完成；M6 进行中，gate 2/7 开放，gate 4 本轮低载精确 p99 未通过。2026-11-05 新增 CV 发布窗口、关停最终归零回归和精确样本/归档测试；本轮结果见 M6 修复记录。ARM64 与 M7 release 用例仍待执行。**
 - 上位：[magpie设计方案.md](magpie设计方案.md) §10；ADR-001/002/003。
 - R1–R7 回归矩阵替代旧半批/overflow/共享字用例；旧反例保留在审核报告。
 
@@ -67,6 +67,7 @@ L1 随机守恒 + L2 确定性缝 + L3 小历史/弱内存有界模型。模型�
 | pool local publication/full | 本地操作已返回；发布后/转投前 | LocalOverflowTaskConservation / LocalFullForwardsOnlyIncomingTask |
 | pool receive | 保留执行项、发布剩余项完成后，执行前；参数为整批认领数 | BulkReceiveCapacityBound / GlobalBatchKeepsExecutionClaimDuringShutdown / StolenBatchKeepsExecutionClaimDuringShutdown |
 | pool victim scan | 全扫描开始（worker index）；每victim探测前 | FullScanCoversAllVictims（逐worker排除自身，检查完整mask） |
+| pool CV park | 锁外探测返回、取得停车 mutex 前 | LocalPublishBetweenProbeAndPark：发布/通知全部完成后才允许最后检查 |
 | pool MPMC reject | 最终 unavailable 后、销毁/回退前 | RejectionRollbackZeroNotifiesWaitingDrainer |
 | block_on_eventcount | 可选前置stop检查后、prepare前 | ShutdownBeforeRegistration |
 | EventCount enter | waiters++后、Waiting写前 | ConcurrentNotifyRegistration |
@@ -76,6 +77,7 @@ L1 随机守恒 + L2 确定性缝 + L3 小历史/弱内存有界模型。模型�
 | EventCount wait | epoch复查后、backend_wait前 | WakeBeforeKernelWait / SeparateWaitWords |
 | backend_signal | CAS标记后、wake前 | WakeBeforeKernelWait / ConcurrentNotifyRegistration |
 | submit | 已过 Gate 且 stop 检查为 false、pending++前；stop under queue mutex 发布后 | ShutdownGateRace |
+| shutdown gate wait | 已读取非零 gate、atomic wait 前 | GateZeroBeforeControllerWait：归零与通知先完成，再允许 wait |
 | drain | 谓词观察到 pending>0、进入 condition wait 的锁交接前 | DrainNotifyRace |
 | dec_pending | 1→0后、drain锁前 | DrainNotifyRace |
 | worker create | 全部 WorkerCtx 已构造，先前 worker 已停在 wait，下一次创建前 | ConstructorFailureRollback |
@@ -103,7 +105,7 @@ T1 watchdog 默认10s，T2 120s，T3由外层job限制；可按工具链调整�
 | deque_test.cpp | PushPopSequential、TwoThreadPushSteal、StealAcrossOwnerPops、LastElementCasFailureRestoresBottom、StealFromFullDequeDeterministic、DifferentialRandomOps、LinearizabilitySmoke（100轮7操作、owner+2thief、real-time precedence、弱try）、SignedIndexBoundary |
 | deque_stress_test.cpp | LastElementRaceAndSlotReuse（1M唯一ID、owner+3thief、容量4） |
 | deque_death_test.cpp | DequeIndexLimit、NullTask（Release/ASan，TSan排除） |
-| pool_workstealing_test.cpp | LocalOverflowTaskConservation、LocalOverflowDefaultCapacity、BulkReceiveCapacityBound、LocalFullForwardsOnlyIncomingTask、CrossPoolSubmitAndShutdownRejectChild、FullScanCoversAllVictims、IdleThiefExecutesLocalChildren |
+| pool_workstealing_test.cpp | LocalOverflowTaskConservation、LocalOverflowDefaultCapacity、BulkReceiveCapacityBound、LocalFullForwardsOnlyIncomingTask、CrossPoolSubmitAndShutdownRejectChild、FullScanCoversAllVictims、IdleThiefExecutesLocalChildren、LocalPublishBetweenProbeAndPark |
 | mpmc_queue_test.cpp | SingleThreadFifo、WrapAround、MultiProdMultiCons、ProducerClaimStall、ConsumerClaimStall、RelaxedQueueHistory、MpmcIndexLimit |
 | mpmc_queue_stress_test.cpp | MultiProdMultiCons（1M ID） |
 | mpmc_queue_death_test.cpp | MpmcIndexLimit、NullPointerPayload（Release/ASan，TSan排除） |
@@ -112,13 +114,14 @@ T1 watchdog 默认10s，T2 120s，T3由外层job限制；可按工具链调整�
 | event_count_test.cpp | SeparateWaitWords、NotifyWithoutWaitersStillAdvancesEpoch、WakeBeforeKernelWait、ConcurrentNotifyRegistration、OldSignalCannotUndoNextRegistration、SpuriousReturnBalancesRegistration、RegistrationBalanced、GenericPredicateHandshake、GenericSpuriousWakeKeepsPredicate |
 | event_count_death_test.cpp | EpochLimit、RegistrationContract（Release/ASan，TSan 排除） |
 | event_count_linux_test.cpp | RealSignalInterruptsKernelWait、SpuriousWakeWithoutWordChange（Linux 原生） |
-| pool_event_count_test.cpp | ShutdownBeforeRegistration、ShutdownAfterRegisteredCheck、ShutdownAfterEpochRecheck、FinalScanUnregistersBeforeUserCode、SpawnWhileIdleWakeup、DrainDuringShutdown、FullFinalScanBeforeEveryPark、GlobalBatchKeepsExecutionClaimDuringShutdown、StolenBatchKeepsExecutionClaimDuringShutdown、BatchRemainderWakesParkedWorker |
-| pool_test.cpp | SubmitAndDrain、StatsQuiescentIdentity、FutureException、ExceptionHandlerCannotSynchronouslyControlItsPool、PoolOwnedHandlerCaptureDestructorHasExecutionGuard、RejectionPoliciesCallerRuns、RejectionRollbackNotifies、DiscardedFutureBrokenPromise、SubmitAfterShutdownReportsReason、ShutdownGateRace、DrainNotifyRace、CallerRunsControlGuard、WorkerControlGuard、WorkerSubmitsChild、WorkerFullQueueFallsBackToCallerRunsUnderAbortPolicy、CapturedDestructorControlGuard、ExecutedCaptureDestructorRunsInsideExecutionFrame、NestedExecutionControlGuard、ConstructorFailureRollback、ConstructorFailureDestroysPoolOwnedHandlerUnderGuard、OptionsValidation |
+| pool_event_count_test.cpp | ShutdownBeforeRegistration、ShutdownAfterRegisteredCheck、ShutdownAfterEpochRecheck、FinalScanUnregistersBeforeUserCode、SpawnWhileIdleWakeup、DrainDuringShutdown、FullFinalScanBeforeEveryPark、GlobalBatchKeepsExecutionClaimDuringShutdown、StolenBatchKeepsExecutionClaimDuringShutdown、BatchRemainderWakesParkedWorker、FinalPendingZeroWakesClosingWorker、FinalPendingZeroBeforeKernelWait、FinalGateZeroWakesClosingWorkerWithoutPending |
+| pool_test.cpp | SubmitAndDrain、StatsQuiescentIdentity、FutureException、ExceptionHandlerCannotSynchronouslyControlItsPool、PoolOwnedHandlerCaptureDestructorHasExecutionGuard、RejectionPoliciesCallerRuns、RejectionRollbackNotifies、DiscardedFutureBrokenPromise、SubmitAfterShutdownReportsReason、ShutdownGateRace、GateZeroBeforeControllerWait、DrainNotifyRace、CallerRunsControlGuard、WorkerControlGuard、WorkerSubmitsChild、WorkerFullQueueFallsBackToCallerRunsUnderAbortPolicy、CapturedDestructorControlGuard、ExecutedCaptureDestructorRunsInsideExecutionFrame、NestedExecutionControlGuard、ConstructorFailureRollback、ConstructorFailureDestroysPoolOwnedHandlerUnderGuard、OptionsValidation |
 | pool_death_test.cpp | DestructorControlGuardDeath |
 | pool_stress_test.cpp | ConcurrentProducersPreserveAcceptedTaskCount（1,000,000 个 task id 逐项校验恰执行一次）；M4 WorkerSpawnConservesUniqueIds（64 root ×16384 child） |
 | api_compile_test.cpp | `TaskCallable` compile-time positive/negative assertions；AcceptsLvalueOnlyAndMoveOnlyCallables |
 | consumer/async_contract.cpp | 独立生产 consumer：保留 shared_future 至池销毁后、正常/异常/丢弃 retirement、CallerRuns/Abort capture guard、pending-before-destruction、CopyOnly lvalue、只移动一次的 throwing-move、构造异常计数回退、void/reference/move-only results；10s watchdog，适用 libc++/libstdc++，无需 GTest ABI |
 | bench/harness_test.cpp、bench/test_runner.py | M2 opt-in：直方图边界/overflow、保守 quantile、完成样本分组、静止计数失败、独立进程统计、配置身份、损坏归档拒绝与禁止覆盖 |
+| bench/test_measurements.py | 精确 p99 与逐条原始样本一致；warmup 不写归档、已有归档拒绝覆盖；single-tail/mixed/CallerRuns 关停存量及计数 |
 
 M3/M4/M5 原语与候选用例已实现；平台通过范围以各 milestone 的实际证据为准。提交门/DrainNotifyRace/部分构造失败交错在独立 `magpie_test_support` 中启用；production `magpie` 不编译测试 hooks。DeathTest 独立进程运行，TSan 不构建该 suite。
 
@@ -129,6 +132,8 @@ R1/R2必须精确强制审核反例顺序。R3/R4在本地容量16/1024、全局
 R5：A通过W5后暂停，通知标记A，B恢复注册；B不能改A的word，放行A后比较失败。R6两侧：shutdown在prepare前已完成、或发生在注册stop检查后；均不得晚睡。
 
 R7：外部CallerRuns、worker局部满fallback、异常回调、capture析构、跨池嵌套回到较早执行帧，分别验证guard。捕获析构中调用控制API的测试应捕获logic_error；throw逃出noexcept destructor按既定语言规则terminate。
+
+关停停车：在 shutdown 的通知已完成后确认新注册，分别仅依赖最后 pending、最后 gate 通知使 worker 退出；主线程在任何额外 shutdown/析构前等待退出。最后项独占执行权回归改用完成的最后扫描作为 peer 观察点，不依赖关停忙等产生第二轮探测。临时变异删除锁内 victim 探测或任一最终通知必须失败，不能靠收尾广播救活。
 
 async capture 的 retirement 必须在仍保留 future/shared_future 时检查，不能先 get/reset future 再检查，否则会掩盖标准库延迟销毁 callable 的差异。`bench/test_runner.py` 的 replay 回归使用冻结长窗口配置验证显式 smoke 永不获得正式资格，并拒绝旧版本错误标记 eligible 的 smoke 初始归档；mock 环境只验证分类逻辑，不作为 Linux 或性能证据。
 

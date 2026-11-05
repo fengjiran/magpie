@@ -13,7 +13,7 @@ python3 scripts/run_ctest.py --build-dir build/release-eventcount --mode stress
 
 ## 获取、注册与执行
 
-先探测 local/global/随机 victim，再执行至多 64 次 cpu_relax、8 次 yield；退避只探测 local/global。仍无任务时 prepare epoch、注册本 worker、重新检查 stopping、完整扫描全部 victim、复查 epoch，最后进入 backend wait。所有路径配平注册，注销前不运行用户代码或发起迁移通知。
+先探测 local/global/随机 victim，再执行至多 1024 次 cpu_relax、8 次 yield（当前内置默认，可按标定选项构建覆写）；退避只探测 local/global。仍无任务时 prepare epoch、注册本 worker、重新检查 stopping→gate→pending 的完整退出谓词、完整扫描全部 victim、复查 epoch，最后进入 backend wait。所有路径配平注册，注销前不运行用户代码或发起迁移通知。
 
 每个成功领取的非空批次保留一个独占执行项，只把其余项发布到本地。这个执行项不再被其他 worker 取走，避免有限任务在 worker 间反复迁移而没有执行。剩余项发布完成后先注销、再通知、再执行；单项批次没有剩余发布，不额外发迁移通知。原有容量钳制、单项 CAS、CallerRuns 与 capture 生命周期契约继续适用。
 
@@ -23,7 +23,7 @@ generic 用每槽 mutex/cv 配对 predicate wait 与 CAS/notify；Linux 用四�
 
 ## 关闭与统计
 
-停止发布后不再重新停车，worker 在 stopping→gate→pending 裁决之前继续探测/退避。长任务尚未完成时其他 worker 可能持续消耗 CPU；这与 CV 候选的关闭期停车不同。修改关闭期停车需要另行证明最终完成通知和晚注册握手，不能仅省掉停止重查。析构 join 后 EventCount 要求注册数为零；单次 drain 不保证所有 worker 已退出或所有统计稳定。
+2026-11-05 起，停止后无任务且仍有 pending/gate 时允许重新停车。shutdown 立即通知；pending 与提交门在停止后的 1→0 分别 notify_all。停止发布与最终 pending 停止检查通过已有 drain mutex 配对，避免两侧遗漏状态；通知在解锁后进行。注册后完整退出复查覆盖最后通知早于注册的情况，epoch/Signaled 覆盖晚于检查的情况。该变更用于避免少量长尾任务期间空闲 worker 忙等，验证与对照见 [M6 修复记录](milestones/M6-review-fixes.md)。析构 join 后注册数必须为零；单次 drain 不保证全部 worker 已退出或统计完全稳定。
 
 | 字段 | 含义 |
 |---|---|
@@ -38,6 +38,8 @@ generic 用每槽 mutex/cv 配对 predicate wait 与 CAS/notify；Linux 用四�
 | pre_sleep_scan_hit / empty | 注册后的最后探测结果；不代表最终一定进入内核 |
 
 统计是逐原子读取的近似快照。后台已退出时可能没有下一次 post_wake 探测，因此不能要求该分项之和始终等于 wait_returns。
+
+这些停车字段仅统计 worker 的 EventCount；同步 shutdown 等提交门的标准 atomic wait/notify 不计入 worker wakes、wait_calls 或 epoch。进程 CPU 测量仍包括控制线程。
 
 ## Linux 原生验收入口
 

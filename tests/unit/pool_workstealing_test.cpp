@@ -9,6 +9,7 @@
 #include <magpie/detail/test_hooks.hpp>
 #include <magpie/thread_pool.hpp>
 #include <memory>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -243,4 +244,56 @@ TEST(WorkStealing, IdleThiefExecutesLocalChildren) {
     pool.shutdown();
     EXPECT_EQ(done.load(), 16U);
     EXPECT_GT(pool.stats().stolen, 0U);
+}
+
+TEST(WorkStealing, LocalPublishBetweenProbeAndPark) {
+    if (!MAGPIE_ENABLE_WORK_STEALING || std::string(MAGPIE_BUILD_PARKING_BACKEND) != "cv") {
+        GTEST_SKIP();
+    }
+    struct Race {
+        std::atomic<bool> armed{false}, paused{false};
+        std::latch probe_done{1}, resume_probe{1};
+        static void hook(Point point, std::size_t, void *context) noexcept {
+            auto &s = *static_cast<Race *>(context);
+            if (point == Point::CvAfterProbeBeforeParkLock && s.armed.load() &&
+                !s.paused.exchange(true)) {
+                s.probe_done.count_down();
+                s.resume_probe.wait();
+            }
+        }
+    } state;
+    magpie::detail::PoolTestHooks hooks{Race::hook, nullptr, &state};
+    Install install(hooks);
+    magpie::test::Watchdog watchdog([&] {
+        std::fprintf(stderr, "CV local-publication race armed=%d paused=%d\n", state.armed.load(),
+                     state.paused.load());
+    });
+    magpie::ThreadPool pool(opts(2));
+    std::latch a_started{1}, release_a{1}, b_started{1}, publish_child{1};
+    std::latch published{1}, child_done{1}, release_b{1};
+    pool.submit([&] {
+        a_started.count_down();
+        release_a.wait();
+    });
+    a_started.wait();
+    pool.submit([&] {
+        b_started.count_down();
+        publish_child.wait();
+        pool.submit([&] { child_done.count_down(); });
+        published.count_down();
+        release_b.wait();
+    });
+    b_started.wait();
+    state.armed.store(true);
+    release_a.count_down();
+    state.probe_done.wait();
+    publish_child.count_down();
+    published.wait(); // Includes the notification, before A takes the mutex.
+    state.resume_probe.count_down();
+    child_done.wait(); // B remains occupied; only A can execute the child.
+    release_b.count_down();
+    pool.shutdown();
+    pool.drain();
+    EXPECT_EQ(pool.stats().completed, 3U);
+    EXPECT_EQ(pool.stats().pending, 0U);
 }

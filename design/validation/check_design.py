@@ -97,6 +97,7 @@ void design_hook(const char* name) { if (active_hook) active_hook(name); }
 struct WorkerCtx { std::size_t index; };
 struct ParkingFixture {
     std::atomic<bool> stopping_{false};
+    std::atomic<std::uint64_t> in_flight_submitters_{0}, pending_{0};
     EventCount evc_;
     explicit ParkingFixture(std::size_t n) : evc_(n) {}
     Task* full_scan(WorkerCtx&) noexcept { return nullptr; }

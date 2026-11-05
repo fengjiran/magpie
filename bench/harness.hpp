@@ -35,6 +35,8 @@ struct Config {
     std::size_t fanout = 2;
     std::size_t task_count = 1000;
     double sleep_ms = 10;
+    std::string shutdown_pattern = "uniform";
+    std::string samples_output;
     std::vector<int> worker_cpus;
     std::vector<int> producer_cpus;
 };
@@ -56,6 +58,11 @@ struct Histogram {
     long double sum_ns = 0;
     void add(std::uint64_t ns);
     [[nodiscard]] double quantile(double fraction) const;
+};
+
+struct SampleQuantiles {
+    std::uint64_t count = 0;
+    double p50_us = -1, p99_us = -1, p999_us = -1;
 };
 
 struct Result {
@@ -85,6 +92,8 @@ struct Result {
     Histogram total_latency;
     Histogram worker_latency;
     Histogram inline_latency;
+    // arrival lag, total, worker, inline; computed after the measured window.
+    std::array<SampleQuantiles, 4> quantiles{};
 };
 
 [[nodiscard]] Config parse_config(int argc, char** argv);
@@ -96,7 +105,8 @@ void set_cpus(const std::vector<int>& cpus);
 void pin_current(const std::vector<int>& cpus, std::size_t index);
 [[nodiscard]] ThreadPoolOptions pool_options(const Config& config);
 void check_identity(const ThreadPool::Stats& stats);
-void collect_samples(Result& result, const std::vector<std::vector<Sample>>& samples);
+void collect_samples(Result &result, const std::vector<std::vector<Sample>> &samples,
+                     const std::string &output = {});
 void print_result(const Config& config, const Result& result);
 [[nodiscard]] Result run(const Config& config, double duration, bool measured);
 
