@@ -131,3 +131,23 @@ python3 tools/model/run_event_count_models.py \
 主设计、ADR-002、测试/benchmark 计划、用户说明和 M6 当前状态已同步。GCC `fclose` 函数指针属性警告改为 lambda deleter，没有屏蔽 Werror；最初 CV 测试误用未链接的 build-info 符号、冻结 snapshot 漏 spin_wait.hpp 等首轮失败日志均保留。文档辅助检查默认 clang++ 不存在，使用已安装 clang++-18 后通过。
 
 本轮验证集中于 Linux x86_64/WSL2 的 futex/generic。新协议的 macOS、ARM64、Windows、远端 CI、小时级 soak 及完整 M6 全部历史矩阵未执行。默认仍 mutex；M6 的 gate 2/4/7 不关闭，M7 不推进。布局收益未证实；运行期 CPU 放大与低载 p99 仍是后续优化目标。
+
+## 2026-11-06：复审后的文档与判定链修复
+
+起始 HEAD 为 `3019a3f`，工作区 clean。本轮未修改线程池运行时、异常投递策略或性能阈值，也未提交。
+
+- 撤销“异步异常同时进入 future 和 handler”的错误说明。packaged callable 的用户异常只入 future；裸任务异常交给 handler；handler 再抛仅记录并继续。同步纠正审核报告的 L-2 判断、处置记录和异常分支说明，既有 `ThreadPool.FutureException` 继续守护。
+- `check_design.py` 入口传播 main 返回值；缺失或空 CXX 均返回进程退出码 2。新增独立 fast Python 用例，不依赖 benchmark 开关；正常 CXX=clang++-18 编译与辅助回归也通过。
+- replay 在执行测量前核验全部已登记 `samples_sha256` 的文件，缺失/损坏拒绝且不创建新输出。回归覆盖五份样本中的后续文件损坏，并验证完整样本可继续 replay；原先无样本哈希的聚合归档兼容路径继续通过。
+- p99 比较要求正整数样本数，拒绝 NaN/inf、小数、布尔、零/负数和不可解析值；无效分位数同样返回 insufficient-evidence。
+
+先加入回归并执行，旧实现的 CLI 检查和 runner 测试均失败，原始输出分别保留为 `checker-before.log` 和 `runner-before.log`；实现修复后 CLI 测试、10 个 runner 用例（含子用例）、正常设计辅助检查均通过。最后执行：
+
+```sh
+cmake --build build/release --parallel 2
+python3 scripts/run_ctest.py --build-dir build/release --mode fast
+```
+
+Release fast 为 **23/23 suites**，包含新 `magpie.design-validation-cli`、runner、原始测量集成和既有异常语义回归。原始日志与初始状态存于本机 `results/repair-validation-20261106T145849Z/`；最终 fast 日志为 `release-fast-final.log`。归档判定夹具只验证检查逻辑，不是性能或物理平台证据。
+
+本轮未重跑 stress、sanitizer、模型或性能矩阵；运行时/原语没有变化，前文与复审的相关证据仍按其日期和范围引用。M6 gate 2/4/7 状态保持不变。

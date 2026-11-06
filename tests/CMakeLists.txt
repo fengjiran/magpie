@@ -1,6 +1,10 @@
 include(FetchContent)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+add_test(NAME magpie.design-validation-cli
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/validation/test_check_design.py")
+set_tests_properties(magpie.design-validation-cli PROPERTIES LABELS fast TIMEOUT 30)
+
 find_package(GTest 1.14.0 EXACT CONFIG QUIET)
 if(NOT TARGET GTest::gtest_main)
     set(gtest_force_shared_crt ON CACHE BOOL "Use the shared CRT on Windows" FORCE)

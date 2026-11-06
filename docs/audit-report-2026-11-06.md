@@ -5,14 +5,15 @@
 - 方法：逐文件静态阅读全部生产源码（include/magpie、src 全部 8 个 .cpp/.hpp）、构建配置（CMakeLists、presets、cmake/*）、测试基建（tests/、scripts/）、benchmark 基建（bench/）、模型工具（tools/model/），对照主设计、ADR-001/002/003、test-plan、benchmark-plan、全部里程碑记录；并在本机实际执行配置、构建与测试取证（见 §7）。
 - 判定口径：已验证事实、推断、建议分开标注；正确性/所有权/关闭活性优先于性能；历史审核结论不等于当前状态，一律以当前代码与最新里程碑记录为准。
 - 处置记录（2026-11-06）：H-1 与 L-1 已按 §8 P0 第 1 项就地修复——README.md「验证环境边界」「验证证据」及末尾 M4/M5 段落更新为最新状态，补 M6 段落（gate 2/4/7、五宏标定默认与白名单）与新 preset/TSan Clang 说明；全部链接目标校验存在，`git diff --check` 干净。其余条目维持原判定。
-- 处置记录（2026-11-06，第二轮）：P0 其余条目已处理——L-2（thread-pool.md 注明 submit_async 异常双重投递）、L-3（deque/MPMC 溢出保护防御注释）、L-4（submit_task 防御分支注释）、L-5（spin_wait 回退注释）、L-7（M1.md 补后续验收指引链接）、L-10（check_design.py 缺编译器友好提示，已实测 PASS 与错误提示路径）。L-8/L-9 经用户确认**豁免**：GTest 保持 release tag `v1.14.0`（仅测试依赖、版本已固定），ci.yml 的 actions 保持 major tag（该 CI 尚无远端运行记录）；正式启用远端 CI 时再评估 commit sha 锁定，判定理由登记于此。其余条目维持原判定。
+- 处置记录（2026-11-06，第二轮，历史）：当时将 L-2 误判为 submit_async 异常双重投递并修改了文档，此判断已撤销，见下述勘误。L-3（deque/MPMC 溢出保护防御注释）、L-4（submit_task 防御分支注释）、L-5（spin_wait 回退注释）、L-7（M1.md 后续验收指引）已处理；L-10 当时仅补提示，未正确传播失败退出码。L-8/L-9 经用户确认**豁免**：GTest 保持 release tag `v1.14.0`，ci.yml actions 保持 major tag；正式启用远端 CI 时再评估 sha 锁定。
+- 勘误与后续修复（2026-11-06）：异步 callable 异常只进入 future；handler 再抛仅记录并继续。已据实现和既有 FutureException 回归纠正文档，未改变线程池异常策略。辅助校验入口改为传播失败退出码；replay 校验已登记原始样本；p99 样本数按正整数验证。新增回归及实际验证见 [M6 修复记录](milestones/M6-review-fixes.md)。
 
 ## 1. 总体结论
 
 - 代码库整体质量**高**：所有权模型（RAII TaskOwner/ExecutionScope/OwnerScope）、pending/gate 协议、拒绝策略、关闭握手与主设计及 ADR 逐条对应；release 生效的 fail-fast 与异常路径收口完整；测试体系具备三层证据（守恒 stress / 确定性缝 / 有界 RC11 模型）+ watchdog + 变异负例，是本项目最突出的资产。
 - 本轮全绿取证：默认 release、asan-ubsan、workstealing、eventcount（futex）四个配置的 fast 与 stress 全部通过（详 §7）。**未发现严重级问题**（在当前已实现范围内未发现正确性/所有权/关闭活性缺陷）。
 - 主要风险集中在"已登记未收敛"项：M6 性能门禁 gate 2/4/7 开放（多 worker 亚微秒扩展 0.485×、低载 p99 比值 1.060、CPU 放大 13.8×）、远端 CI/Windows/ARM64/soak 缺证据，以及对外门面 README 与最新证据脱节。
-- 等级分布：高 1、中 4、低 12。以下按用户要求的五个维度组织。
+- 初始历史等级分布为高 1、中 4、低 12，不代表当前未结项；L-2 误判已撤销。以下保留历史审核脉络，当前处置以顶部勘误和修复记录为准。
 
 ## 2. 问题清单总表
 
@@ -24,7 +25,7 @@
 | M-3 | 中 | 功能 | src/thread_pool.cpp submit/submit_mpmc | mutex 与 MPMC 两条提交分发路径结构重复、rejected 记账时点语义错位（弱 try 失败 vs 真满），缺少跨后端口径对照测试 |
 | M-4 | 中 | 功能 | tests/CMakeLists.txt；测试计划 §3 | T3 soak 层无注册用例（--mode soak 按设计返回 3）；小时级 soak 与 M7 release 用例待补 |
 | L-1 | 低 | 文档 | README.md | 未提及 M6 状态、五宏标定参数（MAGPIE_BULK_LIMIT/STEAL_CAP/SPIN_LIMIT/YIELD_LIMIT/VICTIM_TRIES）与 workstealing/eventcount 等新 presets |
-| L-2 | 低 | 文档 | docs/thread-pool.md；src/thread_pool.cpp run_one | submit_async 的 callable 异常既进入 future 又投递 exception_handler（双重投递），文档未明示 |
+| L-2 | 撤销 | 文档 | docs/thread-pool.md；src/thread_pool.cpp run_one | 原双重投递判断不成立；异步用户异常只进入 future。错误文档已纠正，执行策略保持不变 |
 | L-3 | 低 | 代码质量 | include/magpie/chase_lev_deque.hpp try_push/steal、include/magpie/mpmc_queue.hpp | 若干索引上限 fail-fast 分支在当前不等式顺序下不可达（防御性），无注释说明保留意图 |
 | L-4 | 低 | 代码质量 | src/thread_pool.cpp ThreadPool::submit_task | impl_==nullptr 防御分支对已构造对象不可达（仅构造抛异常前窗口），建议注释保留意图 |
 | L-5 | 低 | 代码质量 | src/spin_wait.hpp | 未知架构回退 `atomic_signal_fence` 仅为编译屏障、非硬件退避，无注释说明 |
@@ -82,7 +83,7 @@
 ### 4.2 边界与异常分支
 
 - 容量规范化（≥16、2 的幂、溢出 fail-fast/抛异常）、worker 数上限、pending/gate/epoch/index 上限 fail-fast、null 载荷 fail-fast：实现齐全且 release 生效。
-- 异常回调再抛收口（report_unhandled_exception + terminate）、worker 主循环 catch-all terminate、packaged_task 构造失败在提交计数前传播。
+- 异常回调再抛由 report_unhandled_exception 记录后继续；worker 主循环遇意外异常时记录并 terminate。packaged_task 构造失败在提交计数前传播。
 - 已知未覆盖（均已在记录中显式登记，不是隐藏缺陷）：Windows 零验证；ARM64 零资源；远端 CI 零可核验结果；soak(T3) 无注册用例；M6 gate 2/4/7 开放；W2.7 内存序放宽未开展。
 
 ## 5. 安全性审核
@@ -135,11 +136,11 @@
 
 1. H-1：修订 README「验证环境边界」与「验证证据」两节——改为引用 platform-matrix 与 M5/M6 的最新状态（Linux/WSL2 futex 门禁已完成、M6 进行中 gate 2/4/7 开放），删除"Linux 尚未验收/保留待完成"的过时表述；同步补 M6 段落与五宏标定参数说明。
 2. L-1：README 增补新 presets（release-mpmc/workstealing/eventcount 系列）与 M6 标定宏一行说明。
-3. L-2：thread-pool.md 补充一句"submit_async 的异常同时进入 future 与 exception_handler（若配置）"。
+3. L-2（原建议撤销）：按 packaged_task 的实际契约说明异步用户异常只进入 future；handler 再抛仅记录并继续。保持现有实现与 FutureException 回归。
 4. L-3/L-4/L-5：为不可达防御分支与 spin 回退补 one-line 注释（不动逻辑）。
 5. L-7：M1.md 顶部状态行加"（后续 Linux 编译/运行与 futex 门禁见 M5/M6 与 platform-matrix）"指引。
 6. L-8/L-9：FetchContent GIT_TAG 改 40 位 commit sha；ci.yml 锁定 action commit sha（或记录豁免理由）。
-7. L-10：check_design.py 输出友好的环境提示（当前报错已含 CXX 说明，改为提前检测）——可选。
+7. L-10：check_design.py 提示缺编译器，并通过入口传播退出码 2，保证未运行检查不会被 shell/CI 记为成功；以进程级回归守护。
 
 验收：`git diff --check`、README 建链检查、release fast 全绿不变。
 

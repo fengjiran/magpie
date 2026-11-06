@@ -347,9 +347,10 @@ void instantiate_api(ThreadPool& pool) {
                           fragments["option-validation"] + "\n#define private public\n" +
                           deque + mpmc + event + "\n#undef private\n" + backend + fixture + tests)
         compiler = shlex.split(os.environ.get("CXX", "clang++"))
-        if shutil.which(compiler[0]) is None:
+        if not compiler or shutil.which(compiler[0]) is None:
+            selected = compiler[0] if compiler else ""
             print(
-                f"compiler '{compiler[0]}' not found on PATH; install a C++20 compiler "
+                f"compiler '{selected}' not found on PATH; install a C++20 compiler "
                 "or select one with CXX=/path/to/compiler.",
                 file=sys.stderr,
             )
@@ -368,4 +369,4 @@ void instantiate_api(ThreadPool& pool) {
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

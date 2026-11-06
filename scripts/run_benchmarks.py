@@ -140,12 +140,31 @@ def compare_p99(reference_rows, candidate_rows):
     """Compare empirical quantiles; legacy histogram bounds cannot fill this gap."""
     groups = []
     for rows in (reference_rows, candidate_rows):
-        if not rows or any(row.get("quantile_definition") != "nearest-rank-sample-v1"
-                           or float(row.get("samples", "0")) <= 0
-                           or not math.isfinite(float(row.get("p99_us", "nan")))
-                           or float(row.get("p99_us", "-1")) < 0 for row in rows):
+        if not rows:
             return {"status": "insufficient-evidence", "reason": "missing exact sample p99"}
-        groups.append(statistics.median(float(row["p99_us"]) for row in rows))
+        quantiles = []
+        for row in rows:
+            if row.get("quantile_definition") != "nearest-rank-sample-v1":
+                return {"status": "insufficient-evidence", "reason": "missing exact sample p99"}
+            count = row.get("samples")
+            if isinstance(count, str):
+                # Counts are decimal integers in producer TSV, not floats.
+                if not count.isascii() or not count.isdecimal():
+                    return {"status": "insufficient-evidence", "reason": "invalid sample count"}
+                try:
+                    count = int(count)
+                except ValueError:
+                    return {"status": "insufficient-evidence", "reason": "invalid sample count"}
+            if type(count) is not int or count <= 0:
+                return {"status": "insufficient-evidence", "reason": "invalid sample count"}
+            try:
+                p99 = float(row["p99_us"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                return {"status": "insufficient-evidence", "reason": "invalid sample p99"}
+            if not math.isfinite(p99) or p99 < 0:
+                return {"status": "insufficient-evidence", "reason": "invalid sample p99"}
+            quantiles.append(p99)
+        groups.append(statistics.median(quantiles))
     reference, candidate = groups
     if reference == 0:
         return {"status": "insufficient-evidence", "reason": "zero reference p99"}
@@ -335,6 +354,17 @@ def replay(args):
     initial = json.loads((baseline / "initial/manifest.json").read_text())
     if initial["result"] != "passed" or sha256(baseline / "initial/raw.tsv") != initial["raw_sha256"]:
         raise ValueError("initial baseline data missing or corrupt")
+    # Legacy archives may have only aggregate TSV. Once a raw sample hash is
+    # registered, its distribution evidence must survive intact before replay.
+    for run in initial.get("runs", []):
+        if "samples_sha256" not in run:
+            continue
+        index = run.get("index")
+        if type(index) is not int or index < 0:
+            raise ValueError("invalid sample archive index")
+        samples = baseline / "initial" / ("run-%02d.samples.tsv" % index)
+        if not samples.is_file() or sha256(samples) != run["samples_sha256"]:
+            raise ValueError("frozen sample archive missing or corrupt: " + samples.name)
     config = metadata["config"]
     if config_hash(config) != metadata["config_hash"] or metadata["config_hash"] != initial["config_hash"]:
         raise ValueError("frozen configuration identity mismatch")

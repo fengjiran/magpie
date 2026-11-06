@@ -120,8 +120,9 @@ T1 watchdog 默认10s，T2 120s，T3由外层job限制；可按工具链调整�
 | pool_stress_test.cpp | ConcurrentProducersPreserveAcceptedTaskCount（1,000,000 个 task id 逐项校验恰执行一次）；M4 WorkerSpawnConservesUniqueIds（64 root ×16384 child） |
 | api_compile_test.cpp | `TaskCallable` compile-time positive/negative assertions；AcceptsLvalueOnlyAndMoveOnlyCallables |
 | consumer/async_contract.cpp | 独立生产 consumer：保留 shared_future 至池销毁后、正常/异常/丢弃 retirement、CallerRuns/Abort capture guard、pending-before-destruction、CopyOnly lvalue、只移动一次的 throwing-move、构造异常计数回退、void/reference/move-only results；10s watchdog，适用 libc++/libstdc++，无需 GTest ABI |
-| bench/harness_test.cpp、bench/test_runner.py | M2 opt-in：直方图边界/overflow、保守 quantile、完成样本分组、静止计数失败、独立进程统计、配置身份、损坏归档拒绝与禁止覆盖 |
+| bench/harness_test.cpp、bench/test_runner.py | M2 opt-in：直方图边界/overflow、保守 quantile、完成样本分组、静止计数失败、独立进程统计、配置身份、已登记原始样本缺失/损坏在执行前拒绝、旧聚合归档兼容、非法样本数/分位数返回证据不足、禁止覆盖 |
 | bench/test_measurements.py | 精确 p99 与逐条原始样本一致；warmup 不写归档、已有归档拒绝覆盖；single-tail/mixed/CallerRuns 关停存量及计数 |
+| validation/test_check_design.py | 缺失/空 CXX 返回进程退出码 2，无 PASS 输出；独立 fast 用例，不依赖 benchmark 开关 |
 
 M3/M4/M5 原语与候选用例已实现；平台通过范围以各 milestone 的实际证据为准。提交门/DrainNotifyRace/部分构造失败交错在独立 `magpie_test_support` 中启用；production `magpie` 不编译测试 hooks。DeathTest 独立进程运行，TSan 不构建该 suite。
 

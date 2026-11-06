@@ -44,6 +44,8 @@ M4 harness 新增 `bench_worker_scaling` 和 `bench_skew`，global 构建可作 
 
 旧桶上界之比不能证明 5% p99 门槛，旧归档缺精确列时标记待补证。`compare_p99` 只比较各进程样本 p99 的中位数，不证明无新峰或统计置信界。runner 的 `bench_latency` 每进程另存 `run-XX.samples.tsv`（纳秒 latency/arrival lag、执行分类及 SHA-256），用于复核分布；旧 binary 不产生文件时 manifest 明示证据缺失。I/O 路径通过独立环境变量传递，不改变负载配置 hash；直接运行可用 `--samples-output PATH`。warmup 不写归档，已存在文件拒绝覆盖。
 
+比较时样本数必须为正整数（十进制整数字符串或 int）；非有限值、小数、布尔值及不可解析数据返回 `insufficient-evidence`。p99 本身也须可解析、有限且非负。
+
 原始 TSV 仍保存全部桶计数和执行分组。submit→body-end 早于 capture 析构和 pending 递减；shutdown latency 特指 task body wall。新口径 A/B 需用同一 harness 测量 mutex 和候选，另建冻结源码/binary/校验和，保留旧包，不能从旧聚合桶恢复精确分位数。
 
 准确的 completion totals 在 producers 已 join、shutdown、drain 后校核 `pending=0`、`submitted=completed+discarded`、`completed=worker_completed+inline_completed`。M1 公开 API 不提供独立 join，因此最后 worker 的关闭通知可能仍在完成，`wakes` 不是严格最终通知总数；`wake_threads=NA`。M1 没有的 steal/scan 字段保持零，不能宣称这些路径被测量。`peak_threads_bound` 为结构上限，不冒充采样得到的峰值。
@@ -81,6 +83,8 @@ freeze 在临时 clone 中覆盖当前源码快照、生成独立 baseline commi
 本轮 M1 runtime 已有 macOS sanitizer 证据，M2 新 harness 的 sanitizer 检查另外归档；snapshot 的 Release 检查不替代平台/sanitizer 验收，也不关闭已有测试诊断缺口。
 
 replay 在执行前校核 binary、bundle、初次 raw TSV 和配置身份，使用冻结配置；不重新编译，不覆盖初次历史。每组默认≥5个独立进程、warmup≥2 s、固定时间程序 duration≥10 s；`--smoke` 明确降级。原始 TSV、命令/exit code/stdout/stderr、环境、median/Q1/Q3/IQR、同日/资源一致性和 repeatability ratio 都保留。formal A/B 还要求同日、同资源、物理 Linux，且无 profiler；重复性比值本身不是优化 speedup。
+
+若初始 manifest 已登记 `runs[].samples_sha256`，replay 还会在执行前逐一检查对应原始样本文件及校验和，缺失或损坏直接失败，不创建新的测量输出。旧版未登记原始样本的归档继续按其聚合数据范围处理，不能据此追认分布证据。
 
 replay 的 `--smoke` 保留冻结配置和窗口，但无论 repeat/warmup/duration 是否达到数值要求，正式平台与 A/B 资格都为 false。初始归档若标记 smoke，即使旧 runner 曾错误写入 eligible=true，也不能成为正式对照来源。
 

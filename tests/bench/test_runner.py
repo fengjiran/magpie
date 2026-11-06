@@ -27,6 +27,87 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(result["median_ratio"], 1.2)
         self.assertEqual(runner.compare_p99([base], [base])["status"], "passed")
 
+    def test_p99_requires_a_positive_integer_sample_count(self):
+        valid = {"quantile_definition": "nearest-rank-sample-v1", "samples": "10000", "p99_us": "50"}
+        invalid = (None, "", "NaN", "inf", "-inf", "0.5", "1.5", "1.0", "0", "-1",
+                   "not-a-number", 0, -1, True, False, 1.5, float("nan"), float("inf"))
+        for count in invalid:
+            bad = dict(valid, samples=count)
+            for reference, candidate in (([valid], [bad]), ([bad], [valid])):
+                with self.subTest(samples=count, reference_invalid=reference == [bad]):
+                    self.assertEqual(runner.compare_p99(reference, candidate)["status"],
+                                     "insufficient-evidence")
+        for count in ("1", "10000", 1, 10000):
+            with self.subTest(valid_count=count):
+                self.assertEqual(runner.compare_p99([valid], [dict(valid, samples=count)])["status"],
+                                 "passed")
+
+    def test_p99_invalid_quantiles_are_insufficient_evidence(self):
+        valid = {"quantile_definition": "nearest-rank-sample-v1", "samples": "10000", "p99_us": "50"}
+        for value in (None, "", "NaN", "inf", "-inf", "-1", "invalid"):
+            with self.subTest(p99=value):
+                self.assertEqual(runner.compare_p99([valid], [dict(valid, p99_us=value)])["status"],
+                                 "insufficient-evidence")
+
+    def test_replay_verifies_registered_samples_before_execution(self):
+        # These are archive fixtures. The mocked measurement is never platform
+        # or performance evidence; corruption must be rejected before it runs.
+        for state in ("valid", "missing", "corrupt"):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as directory:
+                baseline = Path(directory)
+                binary, bundle = baseline / "magpie_bench", baseline / "source.bundle"
+                binary.write_bytes(b"frozen fixture")
+                bundle.write_bytes(b"source fixture")
+                initial = baseline / "initial"
+                initial.mkdir()
+                runs = []
+                for index in range(5):
+                    samples = initial / ("run-%02d.samples.tsv" % index)
+                    samples.write_text("latency_ns\tarrival_lag_ns\tinline_execution\n50000\t0\t0\n")
+                    runs.append({"index": index, "samples_sha256": runner.sha256(samples)})
+                # Corrupt a later registered run, not only the first one.
+                config = dict(runner.DEFAULTS, program="bench_latency", **{"arrival-rate": 1000})
+                identity = runner.config_hash(config)
+                data = ("total_ops_s\tquantile_definition\tsamples\tp99_us\n" +
+                        "100\tnearest-rank-sample-v1\t1\t50\n" * 5)
+                (initial / "raw.tsv").write_text(data)
+                environment = {"captured_local": "2026-11-06T12:00:00+0800"}
+                manifest = {"result": "passed", "raw_sha256": runner.sha256(initial / "raw.tsv"),
+                            "config_hash": identity, "environment": environment,
+                            "formal_platform_eligible": False,
+                            "runs": runs}
+                (initial / "manifest.json").write_text(json.dumps(manifest))
+                metadata = {"result": "frozen", "baseline_commit": "fixture",
+                            "binary_sha256": runner.sha256(binary), "bundle_sha256": runner.sha256(bundle),
+                            "config": config, "config_hash": identity}
+                (baseline / "baseline.json").write_text(json.dumps(metadata))
+                if state == "missing":
+                    samples.unlink()
+                elif state == "corrupt":
+                    samples.write_text("corrupt")
+                args = argparse.Namespace(baseline=baseline, output=baseline / "replay", repeat=5,
+                                          smoke=False, platform_attested="off", profile=False)
+
+                def measure(binary, config, output, *args):
+                    output.mkdir()
+                    (output / "manifest.json").write_text(json.dumps({
+                        "environment": environment, "formal_platform_eligible": False,
+                        "config_hash": identity}))
+                    return [{"total_ops_s": "100", "quantile_definition": "nearest-rank-sample-v1",
+                             "samples": "1", "p99_us": "50"} for _ in range(5)]
+
+                with patch.object(runner, "run_series", side_effect=measure) as measured:
+                    if state == "valid":
+                        runner.replay(args)
+                        measured.assert_called_once()
+                        comparison = json.loads((args.output / "comparison.json").read_text())
+                        self.assertEqual(comparison["p99_sample_comparison"]["status"], "passed")
+                    else:
+                        with self.assertRaisesRegex(ValueError, "sample archive"):
+                            runner.replay(args)
+                        measured.assert_not_called()
+                        self.assertFalse(args.output.exists())
+
     def test_summary_independent_repeats(self):
         summary = runner.summarize([{"ops": str(v), "mode": "pool"} for v in (1, 2, 3, 4, 9)])
         self.assertEqual(summary["ops"], {"median": 3, "q1": 2, "q3": 4, "iqr": 2})
