@@ -12,13 +12,15 @@ cmake --build --preset release
 python3 scripts/run_ctest.py --build-dir build/release --mode fast
 ```
 
-三个互相独立的构建目录和变体：
+三个基础构建目录和变体：
 
 ```sh
 cmake --preset release       # Release，不启用 sanitizer
 cmake --preset tsan          # RelWithDebInfo + ThreadSanitizer
 cmake --preset asan-ubsan    # RelWithDebInfo + AddressSanitizer/UndefinedBehaviorSanitizer
 ```
+
+候选后端另有 `*-mpmc`、`*-workstealing`、`*-eventcount` 与 `bench*` 系列 preset（见后文 M3–M6 各节）。Linux 的 TSan preset 应使用 Clang（`-DCMAKE_CXX_COMPILER=clang++`）：GCC 的 `-Wtsan` 对 `atomic_thread_fence` 不支持，工程保持 `-Werror`，不屏蔽诊断。
 
 配置时默认构建测试（由标准 CMake 选项 `BUILD_TESTING` 控制）。GTest 仅作为测试依赖，优先使用精确版本 1.14.0 的已安装 CMake package；未找到时通过 CMake FetchContent 获取固定 release tag `v1.14.0`。生产库没有第三方运行时依赖。使用 `-DMAGPIE_BUILD_SHARED=ON` 可构建共享库；`MAGPIE_CACHE_LINE` 默认为 64，必须是 16 到 4096 之间的 2 的幂。Release 工程目标显式使用 `-O2`（MSVC 使用 `/O2`）；自有生产、测试与 consumer 目标启用 `-Wall -Wextra -Werror`（MSVC 使用 `/W4 /WX`），不向下游目标传播。
 
@@ -46,9 +48,9 @@ M2 benchmark 的构建、负载矩阵、采样口径、资源控制、基线冻�
 macOS 数据只供开发；M2 完整矩阵与正式冻结仍待固定物理 Linux 验收。
 
 - 完整最低版本、架构和验证状态见 [`docs/platform-matrix.md`](docs/platform-matrix.md)。
-- M1 Linux worker 创建代码使用 `pthread_create`/线程属性；macOS、Windows 等 generic 后端使用 `std::thread`。本机运行过 generic 后端；Linux 源码尚未由 Linux 编译或原生运行验收。
-- Linux futex 是独立原生后端测试，macOS 的 generic 测试不能替代它。
-- GenMC 固定 v0.17.0 的 RC11 atomic/fence capability probe 已在本机实际通过；日志、版本和 DOT graph 归档在本机 `results/model/genmc-20261003T041133.472502Z/`（不随仓库跟踪）。它验证模型工具输入能力，不覆盖项目原语；运行入口和边界见 [`tools/model/README.md`](tools/model/README.md)。
+- M1 Linux worker 创建代码使用 `pthread_create`/线程属性；macOS、Windows 等 generic 后端使用 `std::thread`。macOS 本机验证的是 generic 后端；Linux pthread 后端已在 Linux 实际编译并随后续里程碑的池级 fast/stress 运行（见 [M5 milestone](docs/milestones/M5.md)）。
+- Linux futex 是独立原生后端；其正确性门禁已于 2026-10-11 在 Linux x86_64（WSL2、真实内核与 futex syscall，GCC 14/Clang 18）完成验收，macOS 的 generic 测试不能替代它（见 [M5 milestone](docs/milestones/M5.md)）。ARM64 与固定物理 Linux 性能验收另行记录。
+- GenMC 固定 v0.17.0 的 RC11 atomic/fence capability probe 已在本机实际通过；日志、版本和 DOT graph 归档在本机 `results/model/genmc-20261003T041133.472502Z/`（不随仓库跟踪）。它验证模型工具输入能力，不覆盖项目原语；项目原语（MPMC/deque/EventCount）的有界 RC11 投影运行入口与结果边界见 [`tools/model/README.md`](tools/model/README.md)，执行证据在各里程碑记录。
 - ARM64 必须用实际 ARM64 主机或云机执行，x86_64 结果不能替代。
 
 ## 验证证据
@@ -61,4 +63,6 @@ M3 的原语 API、候选构建和 weak try/关闭边界见 [docs/mpmc-queue.md]
 
 M4 的容量、owner TLS、单元素窃取与 fallback 见 [工作窃取说明](docs/work-stealing.md)，构建可选 `release-workstealing` 等 presets；实际验证和未关闭门禁见 [M4 milestone](docs/milestones/M4.md)。
 
-M5 的每 worker WaitSlot、generic/futex、退避、关闭期 CPU 与统计口径见 [EventCount 说明](docs/event-count.md)，可选 `release-eventcount` 等 presets。Linux 原生验收保留待完成，见 [M5 milestone](docs/milestones/M5.md)。
+M5 的每 worker WaitSlot、generic/futex、退避、关闭期 CPU 与统计口径见 [EventCount 说明](docs/event-count.md)，可选 `release-eventcount` 等 presets。Linux futex 原生门禁已验收（M5 完成）；2026-11-05 起关停期允许重新停车并补齐 pending/gate 最终通知，见 [M5 milestone](docs/milestones/M5.md) 与 [M6 修复记录](docs/milestones/M6-review-fixes.md)。
+
+M6 性能标定与正式验收进行中（gate 2/4/7 开放：多 worker 亚微秒扩展与 CPU 放大、低载精确 p99），生产默认仍 mutex/global/CV；候选切换以关闭对应门禁为前提。内置标定默认 BULK=32/STEAL=64/SPIN=1024/YIELD=8/VICTIM=1，可经 `MAGPIE_BULK_LIMIT/STEAL_CAP/SPIN_LIMIT/YIELD_LIMIT/VICTIM_TRIES`（空＝内置默认，枚举白名单校验见 `cmake/MagpieOptions.cmake`）构建覆写。证据与未关闭门禁见 [M6 milestone](docs/milestones/M6.md) 与 [M6 修复记录](docs/milestones/M6-review-fixes.md)。

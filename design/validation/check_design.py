@@ -10,7 +10,9 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
+import sys
 import tempfile
 
 
@@ -345,6 +347,13 @@ void instantiate_api(ThreadPool& pool) {
                           fragments["option-validation"] + "\n#define private public\n" +
                           deque + mpmc + event + "\n#undef private\n" + backend + fixture + tests)
         compiler = shlex.split(os.environ.get("CXX", "clang++"))
+        if shutil.which(compiler[0]) is None:
+            print(
+                f"compiler '{compiler[0]}' not found on PATH; install a C++20 compiler "
+                "or select one with CXX=/path/to/compiler.",
+                file=sys.stderr,
+            )
+            return 2
         flags = ["-std=c++20", "-pthread", "-Wall", "-Wextra", "-Werror"]
         subprocess.run(compiler + flags + ["-fsyntax-only", str(api)], check=True, timeout=60)
         print("PASS PublicApiTemplateCompilation", flush=True)

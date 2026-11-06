@@ -20,7 +20,7 @@ pool.shutdown();
 
 `worker_count == 0` 使用 `std::thread::hardware_concurrency()`，平台返回零时回退为 1。全局和预留本地容量都至少为 16，校验后向上取整到 2 的幂。M1 只为全局容量分配队列槽；`local_deque_capacity` 在默认全局构建中只校验，M4 候选按每 worker 实际分配槽。
 
-`submit_async` 返回 `std::future`，不保证任务一定由 worker 执行：CallerRuns 可能在它返回前完成 future。packaged callable 的异常保存在 future 中。`submit` 任务的异常交给 `exception_handler`；没有 handler 时写入 stderr。多个 worker 和外部 CallerRuns 提交者可以并发调用 handler，因此 handler 的可变捕获状态必须由调用方保证线程安全。池不会用回调锁串行用户 handler。
+`submit_async` 返回 `std::future`，不保证任务一定由 worker 执行：CallerRuns 可能在它返回前完成 future。packaged callable 的异常保存在 future 中；该异常同时仍会触发 `exception_handler`（若配置），两条投递都会发生。`submit` 任务的异常交给 `exception_handler`；没有 handler 时写入 stderr。多个 worker 和外部 CallerRuns 提交者可以并发调用 handler，因此 handler 的可变捕获状态必须由调用方保证线程安全。池不会用回调锁串行用户 handler。
 
 异步 Task 直接拥有存储的 callable，并按 `F&` 调用；从提交参数构造一次，支持 CopyOnly lvalue 和 move-only rvalue。构造失败直接传播，尚未进入提交计数。保留 `future`/`shared_future` 不延长 callable 或其 capture 的 lifetime：正常执行、丢弃和拒绝时，它们在池的 ExecutionFrame 内随 Task 销毁，先于对应 pending 递减。future ready 可以早于 capture 销毁；返回结果本身及显式外部共享对象的 lifetime 由调用方管理。引用结果不延长被引用对象的 lifetime，不能返回指向 Task 自有 capture 的引用。
 

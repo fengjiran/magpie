@@ -179,6 +179,8 @@ template <MpmcPayload T> class MPMCQueue final {
         std::fprintf(stderr, "magpie: %s\n", message);
         std::terminate();
     }
+    // 保护 seq 的 pos+1 与槽释放时的 pos+capacity 增量：任何加法越过
+    // size_t 上界前 fail-fast，避免无符号回绕破坏世代比较。
     void require_index_room(std::size_t position) const noexcept {
         if (position > std::numeric_limits<std::size_t>::max() - capacity_) {
             fail("MPMC index limit");

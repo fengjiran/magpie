@@ -14,6 +14,8 @@ inline void cpu_relax() noexcept {
 #elif defined(__aarch64__) || defined(__arm__)
     asm volatile("yield");
 #else
+    // 未知架构没有可用的硬件退避指令：退化为编译屏障。
+    // 无 CPU relaxation 效果，仅在可移植构建路径上占位。
     std::atomic_signal_fence(std::memory_order_seq_cst);
 #endif
 }

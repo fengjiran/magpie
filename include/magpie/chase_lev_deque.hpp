@@ -53,6 +53,8 @@ public:
         if (b - t >= static_cast<std::int64_t>(capacity_)) {
             return false;
         }
+        // b+1 发布递增的溢出保护：满容路径已在上方返回，本检查仅覆盖
+        // 索引空间顶部的剩余边界，是 release 也生效的 fail-fast。
         if (b == std::numeric_limits<std::int64_t>::max()) {
             fail("deque index limit");
         }
@@ -75,6 +77,7 @@ public:
         if (t <= b) {
             candidate = slots_[static_cast<std::size_t>(b) & mask_].load(std::memory_order_relaxed);
             if (t == b) {
+                // t+1 CAS 递增的溢出保护：仅在索引空间顶部的最后项竞争分支可达。
                 if (t == std::numeric_limits<std::int64_t>::max()) {
                     fail("deque index limit");
                 }
@@ -105,6 +108,8 @@ public:
         }
         Task* candidate =
             slots_[static_cast<std::size_t>(t) & mask_].load(std::memory_order_relaxed);
+        // t+1 CAS 递增的溢出保护。t<b 时 b 不可能超过 INT64_MAX，此分支是
+        // 防御性 fail-fast，正常协议状态下不可达；保留以防索引假设变化。
         if (t == std::numeric_limits<std::int64_t>::max()) {
             fail("deque index limit");
         }
